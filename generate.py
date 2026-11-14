@@ -93,19 +93,39 @@ JSON me hi jawab do:
     return gemini(prompt)
 
 
+_last_img_call = 0.0
+POLL_KEY = os.environ.get("POLLINATIONS_API_KEY", "").strip()
+
+
 def make_image(prompt, path, seed):
+    """Pollinations se image. Key ho to gen.pollinations.ai (fast), warna free anonymous endpoint
+    (anonymous me 15 sec me sirf 1 request allowed hai, isliye gap rakha hai)."""
+    global _last_img_call
     full = f"{STYLE}. {prompt}"
-    url = "https://image.pollinations.ai/prompt/" + quote(full)
-    for i in range(5):
+    if POLL_KEY:
+        url = "https://gen.pollinations.ai/image/" + quote(full)
+        params = {"width": 720, "height": 1280, "seed": seed, "model": "flux", "key": POLL_KEY}
+    else:
+        url = "https://image.pollinations.ai/prompt/" + quote(full)
+        params = {"width": 720, "height": 1280, "seed": seed, "nologo": "true", "model": "flux"}
+    last = "no response"
+    for i in range(6):
+        if not POLL_KEY:
+            wait = 17 - (time.time() - _last_img_call)
+            if wait > 0:
+                time.sleep(wait)
+            _last_img_call = time.time()
         try:
-            r = requests.get(url, params={"width": W, "height": H, "seed": seed, "nologo": "true", "model": "flux"}, timeout=180)
+            r = requests.get(url, params=params, timeout=150)
             if r.ok and r.headers.get("content-type", "").startswith("image"):
-                path.write_bytes(r.content); return
-            print("image fail", r.status_code)
-        except Exception as e:
-            print("image err", e)
-        time.sleep(10 * (i + 1))
-    raise RuntimeError("Image generate nahi hui: " + prompt[:60])
+                path.write_bytes(r.content)
+                return
+            last = f"HTTP {r.status_code} {r.text[:80]!r}"
+        except requests.exceptions.RequestException as e:
+            last = type(e).__name__
+        print("image fail:", last)
+        time.sleep(15 * (i + 1))
+    raise RuntimeError(f"Image generate nahi hui ({last})")
 
 
 def find_font():
