@@ -7,7 +7,8 @@ import edge_tts
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 TG_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TG_CHAT = os.environ["TELEGRAM_CHAT_ID"]
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")  # agar model band ho jaye to yahan naya naam daalna
+# Pehla model fail (404) ho to agla try hoga. gemini-2.5-flash Oct 2026 me band ho chuka hai.
+MODELS = [m for m in [os.environ.get("GEMINI_MODEL"), "gemini-3.8-flash", "gemini-4-hydrogen", "gemini-3.1-flash-lite"] if m]
 VOICE = os.environ.get("TTS_VOICE", "hi-IN-SwaraNeural")     # male: hi-IN-MadhurNeural
 
 W, H = 1080, 1920
@@ -39,15 +40,22 @@ def load_history():
 
 
 def gemini(prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent?key={GEMINI_KEY}"
     body = {"contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": {"responseMimeType": "application/json", "temperature": 1.0}}
-    for i in range(3):
-        r = requests.post(url, json=body, timeout=120)
-        if r.ok:
-            return json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])
-        print("Gemini error", r.status_code, r.text[:200]); time.sleep(10)
-    r.raise_for_status()
+    headers = {"x-goog-api-key": GEMINI_KEY}  # key URL me nahi, taaki error message me leak na ho
+    last = ""
+    for model in MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        for i in range(3):
+            r = requests.post(url, json=body, headers=headers, timeout=180)
+            if r.ok:
+                return json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+            last = f"{model}: HTTP {r.status_code} {r.text[:150]}"
+            print("Gemini error", last)
+            if r.status_code == 404:
+                break  # ye model nahi mila, agla model try karo
+            time.sleep(10)
+    raise RuntimeError("Gemini fail: " + last)
 
 
 def make_script(kind, used):
