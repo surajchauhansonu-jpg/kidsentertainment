@@ -435,6 +435,10 @@ def make_bg(kind, seed=0):
         g.ellipse((700, 190, 940, 430), (255, 246, 205)); g.ellipse((770, 150, 1000, 380), (0, 0, 0, 0))
         _hills(g, (34, 52, 98), 1230, 70, seed); _hills(g, (28, 70, 90), 1380, 55, seed + 1, 900)
         g.rectangle((0, 1490, 1080, 1920), (36, 84, 96))
+        # Warm fireflies give the foreground a little life without distracting from faces.
+        for i in range(22):
+            x = rng.uniform(25, 1055); y = rng.uniform(1180, 1760); r = rng.choice((3, 4, 6))
+            g.ellipse((x-r, y-r, x+r, y+r), (255, 230, 135))
     elif kind == "room":
         base = _grad((255, 226, 180), (255, 214, 160))
         g.rectangle((0, 1380, 1080, 1920), (212, 160, 100))
@@ -448,6 +452,14 @@ def make_bg(kind, seed=0):
         g.rounded_rectangle((110, 380, 380, 600), 14, (130, 90, 60)); g.rounded_rectangle((128, 398, 362, 582), 8, (255, 245, 220))
         g.ellipse((200, 440, 290, 530), (255, 170, 80))
         g.ellipse((120, 1440, 960, 1700), (232, 110, 120)); g.ellipse((190, 1470, 890, 1670), (250, 160, 150))
+        # Small framed family art and a plant make the room feel lived in.
+        g.rounded_rectangle((90, 760, 300, 1010), 16, (150, 100, 65))
+        g.rectangle((110, 780, 280, 990), (255, 242, 204))
+        g.ellipse((155, 820, 205, 870), (255, 190, 80)); g.ellipse((188, 832, 238, 882), (255, 130, 150))
+        g.line([(835, 1280), (835, 1110)], (90, 135, 78), 10)
+        for x, y in ((800, 1150), (870, 1185), (805, 1225)):
+            g.ellipse((x-34, y-18, x+34, y+18), (75, 165, 90))
+        g.rounded_rectangle((770, 1270, 900, 1320), 12, (205, 105, 75))
     elif kind == "forest":
         base = _grad((170, 230, 190), (110, 190, 140))
         for i, (col, hh, yb) in enumerate([((90, 160, 110), 700, 1250), ((70, 140, 90), 820, 1330), ((50, 120, 70), 920, 1420)]):
@@ -457,6 +469,11 @@ def make_bg(kind, seed=0):
         for _ in range(14):
             x, y = rng.uniform(0, 1080), rng.uniform(1540, 1900)
             g.ellipse((x - 26, y - 26, x + 26, y - 4), (230, 70, 70)); g.rectangle((x - 7, y - 4, x + 7, y + 16), (250, 240, 220))
+        # Layered grass tufts add foreground depth around the characters.
+        for x in range(15, 1080, 58):
+            y = rng.uniform(1670, 1900)
+            g.line([(x, y), (x-rng.uniform(8, 18), y-rng.uniform(28, 62))], (45, 118, 65), 5)
+            g.line([(x, y), (x+rng.uniform(8, 18), y-rng.uniform(24, 55))], (55, 135, 70), 5)
     elif kind == "pond":
         base = _grad((135, 205, 250), (225, 245, 255))
         _cloud(g, 250, 300, 1.2); _cloud(g, 800, 460, 0.9)
@@ -489,6 +506,13 @@ def make_bg(kind, seed=0):
                 ax, ay = x + 11 * math.cos(a * 1.256), y + 11 * math.sin(a * 1.256)
                 g.ellipse((ax - 7, ay - 7, ax + 7, ay + 7), col)
             g.ellipse((x - 5, y - 5, x + 5, y + 5), (255, 200, 60))
+        # A few taller foreground stems create a layered storybook frame.
+        for x in range(24, 1080, 76):
+            y = rng.uniform(1690, 1910)
+            g.line([(x, y), (x-10, y-42)], (48, 138, 70), 5)
+            g.line([(x, y-18), (x+17, y-31)], (64, 155, 76), 4)
+            if x % 3 == 0:
+                g.ellipse((x-5, y-50, x+5, y-40), (255, 210, 82))
     layer = big.resize((1080, 1920), Image.LANCZOS)
     bg = Image.fromarray(base, "RGB").convert("RGBA")
     return Image.alpha_composite(bg, layer).convert("RGB")

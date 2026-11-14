@@ -1,15 +1,14 @@
-"""Kids reels bot v4 (100% free): code-drawn 2D vector characters with real rig animation
-(blink, lip-sync, wave, walk, jump, dance), procedural backgrounds + props, expressive Gemini TTS,
-background music, Telegram delivery. Koi AI image API nahi chahiye. Screen par text nahi."""
+"""Kids reels bot: code-drawn 2D characters, expressive animation and Hindi captions.
+Procedural scenes, narration, music and optional Telegram delivery."""
 import os, sys, re, json, asyncio, random, subprocess, time, glob, base64, math, requests
 from pathlib import Path
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFont
 import rig
 
-GEMINI_KEY = os.environ["GEMINI_API_KEY"]
-TG_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TG_CHAT = os.environ["TELEGRAM_CHAT_ID"]
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
+TG_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TG_CHAT = os.environ.get("TELEGRAM_CHAT_ID", "")
 MODELS = [m for m in [os.environ.get("GEMINI_MODEL"), "gemini-3.8-flash", "gemini-4-hydrogen", "gemini-3.1-flash-lite"] if m]
 TTS_MODELS = [m for m in [os.environ.get("GEMINI_TTS_MODEL"), "gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts"] if m]
 G_VOICE = os.environ.get("GEMINI_VOICE", "Zephyr")          # Zephyr / Puck / Leda / Kore
@@ -34,6 +33,8 @@ def load_history():
 
 # ----------------------------- Gemini text -----------------------------
 def gemini(prompt):
+    if not GEMINI_KEY:
+        raise RuntimeError("GEMINI_API_KEY environment variable missing")
     base_cfg = {"responseMimeType": "application/json", "temperature": 1.0}
     headers = {"x-goog-api-key": GEMINI_KEY}
     last = ""
@@ -82,10 +83,11 @@ Bhasha: saral Hindi (Devanagari). Exactly {t['scenes']} chhote scenes (har scene
 Reel ke cartoon characters sirf in me se chuno: {rig.ALL_CHARACTERS}. (boy = chhota ladka/bhai, girl = chhoti ladki/behan, mom = mummy, dad = papa; baaki jaanwar.)
 "cast" me 1 se 4 characters do. Parivaar ki kahani ho to dad, mom, boy, girl use karo; jaanwar ki kahani ho to jaanwar.
 Har scene me:
- - "narration": voiceover, SIRF 1 chhota vakya (8-12 shabd), Devanagari. Screen par likha nahi jayega.
+ - "narration": voiceover, SIRF 1 chhota vakya (8-12 shabd), Devanagari. Yehi line video subtitle me dikhegi.
  - "bg": {rig.BACKGROUNDS} me se ek (kahani ke mood ke hisaab se, scenes me badalte raho).
  - "chars": 1 se 4 characters (jitne us scene me hon) [{{"who": cast me se, "action": {rig.ACTIONS} me se, "emotion": "happy"|"neutral"|"surprised"}}]. Pehla character wahi hai jiska muh voice ke saath hilta hai. Actions har scene me badalte raho. Pehle scene me "wave", ant me "jump" ya "dance".
- - "props": 0 se 3 cheezein {rig.PROPS} me se jo narration se milti hon (jaise machhli ki baat ho to "fish", raat ho to "moon","star").
+ - "props": 1 se 3 cheezein {rig.PROPS} me se jo narration se milti hon. Har scene me kam-se-kam ek relevant prop rakho.
+Har scene ko alag visual moment banao: narration ka ek specific action dikhao, character action badlo, aur props ko scene ki jagah (aasman/zameen) ke hisaab se chuno. Sirf generic pose aur random decoration mat do. Shuruaat me turant curiosity, beech me chhota surprise, ant me emotional ya funny payoff rakho.
 Sirf JSON me jawab do:
 {{"title": "...", "caption": "Instagram caption Hindi me 1-2 line + emoji", "hashtags": ["#..",".."], "cast": ["bunny"], "scenes": [{{"narration": "...", "bg": "meadow", "chars": [{{"who": "bunny", "action": "wave", "emotion": "happy"}}], "props": ["sun"]}}]}}"""
     return sanitize(gemini(prompt))
@@ -144,6 +146,8 @@ def trim_voice(x):
 
 
 def gemini_tts(text):
+    if not GEMINI_KEY:
+        raise RuntimeError("GEMINI_API_KEY environment variable missing")
     prompt = ("Hindi me ye line ek khush, energetic, mazedaar kahani sunane wale andaaz me bolo, chhote bachon ke liye, "
               "saaf uchcharan, thodi expression ke saath: " + text)
     body = {"contents": [{"parts": [{"text": prompt}]}],
@@ -292,6 +296,64 @@ GROUND_SLOTS = [(140, 1400), (950, 1400), (540, 1250)]
 _STATE = {}
 
 
+def _subtitle_font(size):
+    """Prefer a Devanagari-capable system font; fall back gracefully on other OSes."""
+    candidates = [
+        os.environ.get("REEL_FONT", ""),
+        r"C:\Windows\Fonts\Nirmala.ttf",
+        r"C:\Windows\Fonts\NirmalaB.ttf",
+        r"C:\Windows\Fonts\mangal.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagariUI-Regular.ttf",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            try:
+                return ImageFont.truetype(candidate, size=size)
+            except OSError:
+                pass
+    return ImageFont.load_default()
+
+
+def draw_subtitles(frame, text, scene_index, scene_count):
+    """Phone-safe Hindi captions plus a quiet scene progress indicator."""
+    if os.environ.get("REEL_SUBTITLES", "1").lower() in ("0", "false", "no"):
+        return frame
+    from PIL import ImageDraw
+    draw = ImageDraw.Draw(frame, "RGBA")
+    font = _subtitle_font(54)
+    max_width = 920
+    words, lines, line = text.split(), [], ""
+    for word in words:
+        trial = f"{line} {word}".strip()
+        if line and draw.textbbox((0, 0), trial, font=font)[2] > max_width:
+            lines.append(line); line = word
+        else:
+            line = trial
+    if line:
+        lines.append(line)
+    lines = lines[:3]
+    line_h = 76
+    panel_h = max(150, 58 + len(lines) * line_h)
+    top = 1590
+    draw.rounded_rectangle((48, top, 1032, top + panel_h), radius=34,
+                           fill=(23, 26, 44, 194), outline=(255, 255, 255, 85), width=2)
+    y = top + 28
+    for line in lines:
+        box = draw.textbbox((0, 0), line, font=font, stroke_width=1)
+        x = (W - (box[2] - box[0])) // 2
+        draw.text((x, y), line, font=font, fill=(255, 255, 255, 255),
+                  stroke_width=2, stroke_fill=(20, 24, 38, 235))
+        y += line_h
+    # Thin progress rail makes the short-form pacing feel intentional.
+    rail_y = 1882
+    draw.rounded_rectangle((72, rail_y, 1008, rail_y + 8), radius=4, fill=(255, 255, 255, 95))
+    progress = max(0.0, min(1.0, (scene_index + 1) / max(1, scene_count)))
+    draw.rounded_rectangle((72, rail_y, 72 + int(936 * progress), rail_y + 8), radius=4,
+                           fill=(255, 210, 92, 245))
+    return frame
+
+
 def _assets():
     if "vig" not in _STATE:
         yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
@@ -305,7 +367,7 @@ def _assets():
     return _STATE
 
 
-def scene_frames(sc, bg, voice, idx, prev_last):
+def scene_frames(sc, bg, voice, idx, prev_last, scene_count):
     A = _assets()
     dur = len(voice) / SR + 0.35
     n = int(dur * FPS)
@@ -355,6 +417,7 @@ def scene_frames(sc, bg, voice, idx, prev_last):
             frame.paste(shd, (int(X - shd.width / 2), int(Y - shd.height / 2 + 6)), shd)
             frame.paste(im, (int(X - ax), int(Y - ay - jump)), im)
         frame.paste(A["black"], (0, 0), A["vig"])
+        frame = draw_subtitles(frame, sc["narration"], idx, scene_count)
         if prev_last is not None and f < 6:
             frame = Image.blend(prev_last, frame, ease((f + 1) / 6))
         yield frame
@@ -374,14 +437,14 @@ def render_reel(script, voices, out_path, work):
     wav = Path(work) / "mix.wav"; write_wav(wav, audio)
     cmd = ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
            "-i", str(wav), "-map", "0:v", "-map", "1:a", "-af", "loudnorm=I=-14:TP=-1.5:LRA=11",
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+           "-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p",
            "-c:a", "aac", "-b:a", "160k", "-shortest", str(out_path)]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
     prev, seed = None, random.randint(1, 999)
     for i, sc in enumerate(scenes):
         bg = rig.make_bg(sc["bg"], seed + i)
         last = None
-        for fr in scene_frames(sc, bg, voices[i], i, prev):
+        for fr in scene_frames(sc, bg, voices[i], i, prev, len(scenes)):
             proc.stdin.write(fr.tobytes()); last = fr
         prev = last
     proc.stdin.close()
@@ -399,6 +462,8 @@ def build_reel(kind, script):
 
 
 def send_telegram(video, script, kind):
+    if not TG_TOKEN or not TG_CHAT:
+        raise RuntimeError("Telegram send ke liye TELEGRAM_BOT_TOKEN aur TELEGRAM_CHAT_ID chahiye")
     label = {"fact": "🤯 Fun Fact", "poem": "🎵 Kavita", "story": "📖 Moral Story"}[kind]
     cap = f"{label}: {script['title']}\n\n{script['caption']}\n\n{' '.join(script.get('hashtags', []))}"
     with open(video, "rb") as f:
@@ -415,12 +480,16 @@ def main():
         try:
             script = make_script(kind, [h["title"] for h in hist])
             video = build_reel(kind, script)
-            send_telegram(video, script, kind)
+            if os.environ.get("SEND_TELEGRAM", "0").lower() in ("1", "true", "yes"):
+                send_telegram(video, script, kind)
+            else:
+                print("Saved locally; Telegram sending is off. Set SEND_TELEGRAM=1 to enable it.")
             hist.append({"kind": kind, "title": script["title"], "date": time.strftime("%Y-%m-%d")})
             HISTORY.write_text(json.dumps(hist[-200:], ensure_ascii=False, indent=1))
         except Exception as e:
             print(f"[{kind}] FAILED:", e)
-            requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
+            if os.environ.get("SEND_TELEGRAM", "0").lower() in ("1", "true", "yes") and TG_TOKEN and TG_CHAT:
+                requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage",
                           data={"chat_id": TG_CHAT, "text": f"⚠️ Kids reel ({kind}) fail hui: {str(e)[:300]}"})
 
 
