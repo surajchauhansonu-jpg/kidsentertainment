@@ -67,17 +67,24 @@ def make_script(kind, used):
     t = TASKS[kind]
     topic = random.choice(["jungle", "samundar", "aasman", "khana", "school", "dosti", "mausam", "insaan ka sharir",
                            "kisan", "tyohar", "chidiya", "machhli", "chand-taare", "ped-paudhe", "titli", "baarish"])
+    topic_rule = "Topic ka hint (zaroori nahi): " + topic
+    tf = Path("topics.txt")                       # apne topic yahan likho (ek line = ek idea), bot roz ek chunega
+    if tf.exists():
+        lines = [l.strip() for l in tf.read_text(encoding="utf-8").splitlines() if l.strip() and not l.startswith("#")]
+        if lines:
+            topic_rule = "IS TOPIC/IDEA par hi banao: " + random.choice(lines)
     prompt = f"""Tum bachon ki cartoon reels (Hindi nursery-rhyme channels jaisi) ke scriptwriter ho.
 Kaam: {t['brief']}
-Topic ka hint (zaroori nahi): {topic}
+{topic_rule}
 In titles ko REPEAT mat karna: {used[-40:]}
 Bhasha: saral Hindi (Devanagari). Exactly {t['scenes']} chhote scenes (har scene 2-4 second).
 
-Reel ke host cartoon characters sirf in me se chuno: {list(rig.CHARACTERS)}. "cast" me 1 ya 2 characters do.
+Reel ke cartoon characters sirf in me se chuno: {rig.ALL_CHARACTERS}. (boy = chhota ladka/bhai, girl = chhoti ladki/behan, mom = mummy, dad = papa; baaki jaanwar.)
+"cast" me 1 se 4 characters do. Parivaar ki kahani ho to dad, mom, boy, girl use karo; jaanwar ki kahani ho to jaanwar.
 Har scene me:
  - "narration": voiceover, SIRF 1 chhota vakya (8-12 shabd), Devanagari. Screen par likha nahi jayega.
  - "bg": {rig.BACKGROUNDS} me se ek (kahani ke mood ke hisaab se, scenes me badalte raho).
- - "chars": 1 ya 2 characters [{{"who": cast me se, "action": {rig.ACTIONS} me se, "emotion": "happy"|"neutral"|"surprised"}}]. Pehla character wahi hai jiska muh voice ke saath hilta hai. Actions har scene me badalte raho. Pehle scene me "wave", ant me "jump" ya "dance".
+ - "chars": 1 se 4 characters (jitne us scene me hon) [{{"who": cast me se, "action": {rig.ACTIONS} me se, "emotion": "happy"|"neutral"|"surprised"}}]. Pehla character wahi hai jiska muh voice ke saath hilta hai. Actions har scene me badalte raho. Pehle scene me "wave", ant me "jump" ya "dance".
  - "props": 0 se 3 cheezein {rig.PROPS} me se jo narration se milti hon (jaise machhli ki baat ho to "fish", raat ho to "moon","star").
 Sirf JSON me jawab do:
 {{"title": "...", "caption": "Instagram caption Hindi me 1-2 line + emoji", "hashtags": ["#..",".."], "cast": ["bunny"], "scenes": [{{"narration": "...", "bg": "meadow", "chars": [{{"who": "bunny", "action": "wave", "emotion": "happy"}}], "props": ["sun"]}}]}}"""
@@ -85,12 +92,21 @@ Sirf JSON me jawab do:
 
 
 def sanitize(script):
-    cast = [c for c in script.get("cast", []) if c in rig.CHARACTERS][:2] or ["bunny"]
+    alias = {"papa": "dad", "father": "dad", "mummy": "mom", "mother": "mom", "mama": "mom", "ladka": "boy", "bhai": "boy",
+             "ladki": "girl", "behan": "girl", "sister": "girl", "brother": "boy", "rabbit": "bunny", "teddy": "bear"}
+    fix = lambda w: alias.get(str(w).lower().strip(), str(w).lower().strip())
+    cast = []
+    for c in script.get("cast", []):
+        c = fix(c)
+        if c in rig.ALL_CHARACTERS and c not in cast:
+            cast.append(c)
+    cast = cast[:4] or ["bunny"]
     scenes = []
     for sc in script.get("scenes", []):
         chars = []
-        for c in sc.get("chars", [])[:2]:
-            chars.append({"who": c.get("who") if c.get("who") in rig.CHARACTERS else cast[0],
+        for c in sc.get("chars", [])[:4]:
+            who = fix(c.get("who", ""))
+            chars.append({"who": who if who in rig.ALL_CHARACTERS else cast[0],
                           "action": c.get("action") if c.get("action") in rig.ACTIONS else "talk",
                           "emotion": c.get("emotion") if c.get("emotion") in ("happy", "neutral", "surprised") else "happy"})
         if not chars:
@@ -295,10 +311,8 @@ def scene_frames(sc, bg, voice, idx, prev_last):
     n = int(dur * FPS)
     env = voice_envelope(voice, n)
     chars = sc["chars"]
-    if len(chars) == 1:
-        xs, base = [540], 1.40
-    else:
-        xs, base = [330, 770], 1.10
+    n_c = len(chars)
+    xs, base = {1: ([540], 1.40), 2: ([330, 770], 1.15), 3: ([250, 540, 830], 0.98), 4: ([175, 405, 685, 910], 0.95)}[min(n_c, 4)]
     props = []
     s_i = g_i = 0
     for p in sc["props"]:
@@ -334,8 +348,9 @@ def scene_frames(sc, bg, voice, idx, prev_last):
                 im = im.resize((int(im.width * (1 + (1 - sq) * 0.7)), int(im.height * sq)), Image.BICUBIC)
             ax, ay = im.width * rig.OX / rig.CW, im.height * rig.OY / rig.CH
             X, Y = (wx - left) * k, (GROUND - top) * H / bh
-            jump = pose["jump"] * spx
-            shw = int(250 * spx * (1 - 0.35 * pose["jump"] / 120))
+            szf = rig.size_of(c["who"])
+            jump = pose["jump"] * spx * szf
+            shw = int(250 * spx * szf * (1 - 0.35 * pose["jump"] / 120))
             shd = A["shadow"].resize((max(10, shw), max(4, shw // 4)))
             frame.paste(shd, (int(X - shd.width / 2), int(Y - shd.height / 2 + 6)), shd)
             frame.paste(im, (int(X - ax), int(Y - ay - jump)), im)

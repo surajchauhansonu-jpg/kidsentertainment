@@ -19,6 +19,18 @@ CHARACTERS = {
     "panda": dict(body=(252, 252, 252), belly=(255, 255, 255), limb=(44, 44, 52), hand=(44, 44, 52), inner=(44, 44, 52),
                   nose=(40, 40, 48), cheek=(255, 170, 180), ear="round", tail="puff", patch=(44, 44, 52)),
 }
+HUMANS = {
+    "dad": dict(size=1.00, skin=(222, 170, 128), hair=(38, 30, 36), style="short", top=(70, 120, 205), top_style="shirt",
+                bottom=(62, 66, 96), bottom_style="pants", shoe=(50, 40, 44), leg_h=185, sh=400, tw=156, hrx=96, hry=104, mous=True),
+    "mom": dict(size=0.93, skin=(226, 176, 136), hair=(34, 26, 32), style="bun", top=(214, 62, 122), top_style="kurta",
+                bottom=(255, 238, 200), bottom_style="salwar", shoe=(190, 130, 60), leg_h=180, sh=380, tw=140, hrx=92, hry=100,
+                dupatta=(54, 170, 170), bindi=True, gold=True, trim=(255, 205, 70)),
+    "boy": dict(size=0.74, skin=(228, 178, 138), hair=(30, 24, 30), style="boy", top=(240, 90, 70), top_style="shirt",
+                bottom=(62, 112, 192), bottom_style="shorts", shoe=(250, 250, 250), leg_h=140, sh=300, tw=126, hrx=112, hry=118),
+    "girl": dict(size=0.70, skin=(228, 178, 138), hair=(34, 24, 30), style="pigtails", top=(255, 128, 180), top_style="frock",
+                 bottom=(255, 128, 180), bottom_style="skirt", shoe=(214, 56, 108), leg_h=140, sh=300, tw=118, hrx=112, hry=118,
+                 ribbon=(255, 226, 70), gold=True, trim=(255, 226, 70)),
+}
 ACTIONS = ["talk", "wave", "walk", "jump", "dance", "think", "surprised"]
 BACKGROUNDS = ["meadow", "night", "room", "pond", "forest", "space"]
 PROPS = ["sun", "moon", "star", "cloud", "flower", "apple", "fish", "bird", "heart", "balloon", "rainbow", "tree", "butterfly"]
@@ -77,6 +89,8 @@ def ell_pts(cx, cy, rx, ry, ang=0, n=40):
 # ------------------------------------------------------------------ character
 def draw_critter(who, pose, sc):
     """Upright RGBA character image. sc = pixels per design unit. Feet anchor = (OX*sc, OY*sc)."""
+    if who in HUMANS:
+        return draw_human(who, pose, sc)
     spec = CHARACTERS[who]
     body = Pen(CW, CH, OX, OY, sc * SS); head = Pen(CW, CH, OX, OY, sc * SS)
     bob = pose["bob"]
@@ -177,6 +191,155 @@ def draw_critter(who, pose, sc):
     h_img = head.img.rotate(pose["tilt"], resample=Image.BICUBIC, center=pivot)
     out = Image.alpha_composite(body.img, h_img)
     return out.reduce(SS)
+
+
+
+def size_of(who):
+    return HUMANS[who]["size"] if who in HUMANS else 1.0
+
+
+def _dark(c, f=0.86):
+    return tuple(int(v * f) for v in c)
+
+
+def draw_human(who, pose, sc):
+    sp = HUMANS[who]
+    sc2 = sc * sp["size"]
+    body = Pen(CW, CH, OX, OY, sc2 * SS); head = Pen(CW, CH, OX, OY, sc2 * SS)
+    skin, bob = sp["skin"], pose["bob"]
+    sh, tw, lh, hrx, hry = sp["sh"], sp["tw"], sp["leg_h"], sp["hrx"], sp["hry"]
+    hy = -sh - hry + 14 + bob
+    kid = who in ("boy", "girl")
+
+    # neck
+    body.poly([(-20, hy + hry - 8), (20, hy + hry - 8), (20, -sh + 18), (-20, -sh + 18)], skin, ow=4)
+
+    # legs
+    hipx = tw * 0.24
+    for side in (-1, 1):
+        phi = pose["phi"] + (0 if side < 0 else math.pi)
+        fx = side * hipx + pose["amp"] * 38 * math.sin(phi)
+        fy = -8 - pose["amp"] * 24 * max(0.0, math.cos(phi))
+        hip = (side * hipx, -lh + 20)
+        bs = sp["bottom_style"]
+        if bs in ("pants", "salwar"):
+            body.chain([hip, (fx, fy - 14)], 50 if bs == "pants" else 46, sp["bottom"])
+        else:
+            body.chain([hip, (fx, fy - 14)], 30, skin)
+            if bs == "shorts":
+                mid = (hip[0] + (fx - hip[0]) * 0.38, hip[1] + (fy - 14 - hip[1]) * 0.38)
+                body.chain([hip, mid], 52, sp["bottom"])
+        body.ell(fx + side * 8, fy + 2, 42, 18, sp["shoe"])
+
+    # torso (clothes)
+    ts, tc = sp["top_style"], sp["top"]
+    y0 = -sh + 8
+    if ts == "shirt":
+        body.poly([(-tw / 2 + 14, y0), (tw / 2 - 14, y0), (tw / 2, -sh + 32), (tw / 2 * 0.96, -lh + 22), (-tw / 2 * 0.96, -lh + 22), (-tw / 2, -sh + 32)], tc)
+        body.poly([(-18, y0 + 2), (18, y0 + 2), (0, -sh + 44)], skin, ow=3)
+        if who == "dad":
+            body.line([(0, -sh + 44), (0, -lh + 26)], 4, _dark(tc, 0.7))
+    elif ts == "kurta":
+        yb = -lh * 0.60
+        body.poly([(-tw / 2 + 14, y0), (tw / 2 - 14, y0), (tw / 2, -sh + 32), (tw / 2 * 1.12, yb), (-tw / 2 * 1.12, yb), (-tw / 2, -sh + 32)], tc)
+        body.poly([(-tw / 2 * 1.12, yb - 16), (tw / 2 * 1.12, yb - 16), (tw / 2 * 1.12, yb), (-tw / 2 * 1.12, yb)], sp["trim"], ow=3)
+        body.ell(0, -sh + 16, 24, 15, skin, ow=3)
+        body.line([(-26, -sh + 26), (0, -sh + 40), (26, -sh + 26)], 4, sp["trim"])
+    else:  # frock
+        yb = -lh * 0.52
+        body.poly([(-tw / 2 + 14, y0), (tw / 2 - 14, y0), (tw / 2 - 6, -sh + 64), (tw * 0.98, yb), (-tw * 0.98, yb), (-tw / 2 + 6, -sh + 64)], tc)
+        body.poly([(-tw * 0.98, yb - 14), (tw * 0.98, yb - 14), (tw * 0.98, yb), (-tw * 0.98, yb)], sp["trim"], ow=3)
+        body.line([(-tw / 2 + 8, -sh + 64), (tw / 2 - 8, -sh + 64)], 7, sp["trim"])
+        body.ell(0, -sh + 14, 22, 13, skin, ow=3)
+    if sp.get("dupatta"):
+        dc = sp["dupatta"]
+        body.poly([(-tw / 2 + 4, -sh + 16), (-tw / 2 + 46, -sh + 12), (tw / 2 + 4, -lh * 0.95), (tw / 2 - 40, -lh * 0.95 + 18)], dc, ow=4)
+        body.poly([(tw / 2 - 40, -lh * 0.95 + 18), (tw / 2 + 4, -lh * 0.95), (tw / 2 + 18, -lh * 0.55), (tw / 2 - 28, -lh * 0.62)], dc, ow=4)
+
+    # arms
+    ua, fa = (74, 62) if kid else (86, 72)
+    for side, a1, a2 in ((-1, pose["aL"], pose["fL"]), (1, pose["aR"], pose["fR"])):
+        s0 = (side * (tw / 2 - 6), -sh + 36 + bob)
+        r1, r2 = math.radians(a1), math.radians(a1 + a2)
+        e = (s0[0] + side * ua * math.sin(r1), s0[1] + ua * math.cos(r1))
+        h = (e[0] + side * fa * math.sin(r2), e[1] + fa * math.cos(r2))
+        body.chain([s0, e, h], 30, skin)
+        if sp["top_style"] != "shirt" or who == "boy":
+            mid = (s0[0] + (e[0] - s0[0]) * 0.62, s0[1] + (e[1] - s0[1]) * 0.62)
+            body.chain([s0, mid], 38, tc)
+        else:
+            mid = (s0[0] + (e[0] - s0[0]) * 0.9, s0[1] + (e[1] - s0[1]) * 0.9)
+            body.chain([s0, mid], 38, tc)
+        body.ell(h[0], h[1], 21, 21, skin)
+        if sp.get("gold"):
+            wx, wy = h[0] - (h[0] - e[0]) * 0.28, h[1] - (h[1] - e[1]) * 0.28
+            body.ell(wx, wy, 17, 11, (255, 205, 70), ow=2)
+
+    # ---------------- head layer
+    st = sp["style"]
+    if st == "pigtails":
+        for side in (-1, 1):
+            sw = pose["ear"] * 1.4 * side
+            head.ell(side * (hrx + 30) + sw, hy + 24, 30, 60, sp["hair"])
+            head.ell(side * (hrx * 0.86), hy - 22, 20, 15, sp["ribbon"], ow=3)
+    if st == "bun":
+        head.ell(0, hy - hry - 24, 44, 40, sp["hair"]); head.ell(0, hy - hry + 6, 22, 9, (255, 205, 70), ow=2)
+    for side in (-1, 1):
+        head.ell(side * hrx, hy + 8, 18, 26, skin)
+        if sp.get("gold") and who == "mom":
+            head.ell(side * (hrx + 6), hy + hry * 0.34, 8, 11, (255, 205, 70), ow=2)
+    head.ell(0, hy, hrx, hry, skin)
+
+    # hair cap over the top of the head
+    arc = [(( hrx + 3) * math.cos(math.radians(a)), hy + (hry + 3) * math.sin(math.radians(a))) for a in range(186, 355, 8)]
+    if st == "short":
+        low = [(hrx * 0.94, hy - hry * 0.26), (hrx * 0.5, hy - hry * 0.50), (0, hy - hry * 0.54), (-hrx * 0.5, hy - hry * 0.50), (-hrx * 0.94, hy - hry * 0.26)]
+    elif st == "boy":
+        low = [(hrx * 0.94, hy - hry * 0.24), (hrx * 0.64, hy - hry * 0.42), (hrx * 0.5, hy - hry * 0.18), (hrx * 0.22, hy - hry * 0.44),
+               (0, hy - hry * 0.16), (-hrx * 0.26, hy - hry * 0.44), (-hrx * 0.5, hy - hry * 0.2), (-hrx * 0.7, hy - hry * 0.42), (-hrx * 0.94, hy - hry * 0.24)]
+    elif st == "bun":
+        low = [(hrx * 0.96, hy + hry * 0.08), (hrx * 0.62, hy - hry * 0.30), (0, hy - hry * 0.56), (-hrx * 0.62, hy - hry * 0.30), (-hrx * 0.96, hy + hry * 0.08)]
+    else:
+        low = [(hrx * 0.94, hy - hry * 0.24), (hrx * 0.45, hy - hry * 0.30), (0, hy - hry * 0.26), (-hrx * 0.45, hy - hry * 0.30), (-hrx * 0.94, hy - hry * 0.24)]
+    head.poly(arc + low, sp["hair"], ow=4)
+
+    # eyes
+    blink = pose["blink"]; re_ = hrx * 0.21
+    for side in (-1, 1):
+        ex, ey = side * hrx * 0.42, hy + hry * 0.10
+        if pose["eyes"] == "happy" or blink < 0.18:
+            head.arc(ex, ey, re_ * 0.95, re_ * (0.75 if pose["eyes"] == "happy" else 0.4), 200, 340, 7)
+        else:
+            ry = re_ * 1.18 * pose["eyeS"] * blink
+            head.ell(ex, ey, re_ * (1 + (pose["eyeS"] - 1) * 0.5), ry, (255, 255, 255), ow=4)
+            lx, ly = pose["look"]
+            px, py = ex + lx * 8, ey + ly * 8 + 3
+            head.ell(px, py, re_ * 0.62, min(re_ * 0.62, ry * 0.62), (36, 26, 40), ow=0)
+            head.ell(px - 4, py - 5, 4.5, 4.5, (255, 255, 255), ow=0)
+        lift = 9 if pose["eyeS"] > 1.1 else 0
+        yb = ey - re_ * 1.6 - lift
+        pts = [(ex - re_ * 0.9, yb + 3), (ex + re_ * 0.9, yb - 3)] if side < 0 else [(ex - re_ * 0.9, yb - 3), (ex + re_ * 0.9, yb + 3)]
+        head.chain(pts, 6, sp["hair"], ow=0)
+    # nose / cheeks / mouth
+    head.ell(0, hy + hry * 0.34, 9, 7, _dark(skin, 0.84), ow=2)
+    for side in (-1, 1):
+        head.ell(side * hrx * 0.64, hy + hry * 0.40, 20, 12, (255, 150, 150), ow=0)
+    if sp.get("mous"):
+        for side in (-1, 1):
+            head.ell(side * 17, hy + hry * 0.50, 21, 9, sp["hair"], ow=0)
+    if sp.get("bindi"):
+        head.ell(0, hy - hry * 0.40, 6, 6, (214, 30, 50), ow=0)
+    m = pose["mouth"]; my = hy + hry * 0.62
+    if m > 0.12:
+        mh = 6 + 26 * min(1.0, m)
+        head.ell(0, my + mh * 0.3, 24, mh, (150, 36, 60), ow=4)
+        head.ell(0, my + mh * 0.7, 13, mh * 0.36, (255, 120, 140), ow=0)
+    else:
+        head.arc(0, my - 8, 28, 15, 15, 165, 6)
+
+    pivot = (OX * sc2 * SS, (OY - sh) * sc2 * SS)
+    h_img = head.img.rotate(pose["tilt"], resample=Image.BICUBIC, center=pivot)
+    return Image.alpha_composite(body.img, h_img).reduce(SS)
 
 
 def blink_value(t, ph):
@@ -405,3 +568,6 @@ def prop_bob(name, t, i):
     if name in ("butterfly", "bird"):
         return 40 * math.sin(t * 1.1 + i), 20 * math.sin(t * 2.3 + i)
     return 0, 12 * math.sin(t * 1.8 + i * 1.3)
+
+
+ALL_CHARACTERS = list(CHARACTERS) + list(HUMANS)
