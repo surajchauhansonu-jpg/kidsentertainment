@@ -40,20 +40,38 @@ def load_history():
 
 
 def gemini(prompt):
-    body = {"contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"responseMimeType": "application/json", "temperature": 1.0}}
+    base_cfg = {"responseMimeType": "application/json", "temperature": 1.0}
     headers = {"x-goog-api-key": GEMINI_KEY}  # key URL me nahi, taaki error message me leak na ho
     last = ""
     for model in MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        for i in range(3):
-            r = requests.post(url, json=body, headers=headers, timeout=180)
+        use_think = True  # thinking kam rakhne se jawab jaldi aata hai
+        for attempt in range(3):
+            cfg = dict(base_cfg)
+            if use_think:
+                cfg["thinkingConfig"] = {"thinkingLevel": "low"}
+            body = {"contents": [{"parts": [{"text": prompt}]}], "generationConfig": cfg}
+            try:
+                r = requests.post(url, json=body, headers=headers, timeout=90)
+            except requests.exceptions.RequestException as e:
+                last = f"{model}: {type(e).__name__} (timeout/network)"
+                print("Gemini error", last)
+                time.sleep(5)
+                continue
             if r.ok:
-                return json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+                try:
+                    return json.loads(r.json()["candidates"][0]["content"]["parts"][0]["text"])
+                except Exception as e:
+                    last = f"{model}: bad JSON ({type(e).__name__})"
+                    print("Gemini error", last)
+                    continue
             last = f"{model}: HTTP {r.status_code} {r.text[:150]}"
             print("Gemini error", last)
             if r.status_code == 404:
                 break  # ye model nahi mila, agla model try karo
+            if r.status_code == 400 and use_think:
+                use_think = False  # thinkingConfig is model par accept nahi hua, bina uske try karo
+                continue
             time.sleep(10)
     raise RuntimeError("Gemini fail: " + last)
 
