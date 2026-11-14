@@ -129,6 +129,8 @@ def make_image(prompt, path, seed):
 
 
 def find_font():
+    if os.environ.get("FONT_PATH"):
+        return os.environ["FONT_PATH"]
     for p in ["/usr/share/fonts/truetype/noto/NotoSansDevanagari-Bold.ttf",
               *glob.glob("/usr/share/fonts/**/NotoSansDevanagari*Bold*.ttf", recursive=True),
               *glob.glob("/usr/share/fonts/**/NotoSansDevanagari*.ttf", recursive=True)]:
@@ -137,82 +139,273 @@ def find_font():
     raise RuntimeError("Devanagari font nahi mila (fonts-noto-core install karo)")
 
 
-def wrap(draw, text, font, max_w):
-    lines, cur = [], ""
-    for word in text.split():
-        test = (cur + " " + word).strip()
-        if draw.textlength(test, font=font) <= max_w:
-            cur = test
-        else:
-            lines.append(cur); cur = word
+# ======================= V2 RENDERER: full-motion look =======================
+import math
+import numpy as np
+
+FPS = 30
+SR = 44100
+_FONT_CACHE = {}
+
+
+def font(size):
+    if size not in _FONT_CACHE:
+        _FONT_CACHE[size] = ImageFont.truetype(find_font(), size)
+    return _FONT_CACHE[size]
+
+
+def ease(x):                      # smoothstep
+    x = max(0.0, min(1.0, x))
+    return x * x * (3 - 2 * x)
+
+
+def ease_out_back(x):
+    x = max(0.0, min(1.0, x))
+    c1, c3 = 1.70158, 2.70158
+    return 1 + c3 * (x - 1) ** 3 + c1 * (x - 1) ** 2
+
+
+# ---------- captions: chhote chunks, word-by-word highlight, bina bhaari box ----------
+CAP_FONT = 78
+CAP_CENTER_Y = 1330               # Instagram ke neeche wale buttons se upar
+
+
+def split_chunks(words, max_words=4):
+    chunks, cur = [], []
+    for w in words:
+        cur.append(w)
+        if len(cur) >= max_words or w[-1] in ",.?!।":
+            chunks.append(cur); cur = []
+    if cur:
+        chunks.append(cur)
+    return chunks
+
+
+def render_caption(chunk, active):
+    f = font(CAP_FONT)
+    tmp = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
+    space = tmp.textlength(" ", font=f)
+    max_w = W - 200
+    lines, cur, cur_w = [], [], 0
+    for i, w in enumerate(chunk):
+        ww = tmp.textlength(w, font=f)
+        if cur and cur_w + space + ww > max_w:
+            lines.append(cur); cur, cur_w = [], 0
+        cur.append((i, w, ww)); cur_w += ww + (space if len(cur) > 1 else 0)
     if cur:
         lines.append(cur)
-    return lines
+    lh = int(CAP_FONT * 1.45)
+    img = Image.new("RGBA", (W, lh * len(lines) + 60), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    y = 30
+    for ln in lines:
+        total = sum(x[2] for x in ln) + space * (len(ln) - 1)
+        x = (W - total) / 2
+        for i, w, ww in ln:
+            col = (255, 214, 10, 255) if i == active else (255, 255, 255, 255)
+            d.text((x, y), w, font=f, fill=col, stroke_width=9, stroke_fill=(20, 20, 40, 255))
+            x += ww + space
+        y += lh
+    return img
 
 
-def base_and_caption(img_path, text, base_out, cap_out):
+def word_timeline(text, voice_len):
+    words = text.split()
+    wts = [len(w) + 2 + (5 if w[-1] in ",.?!।" else 0) for w in words]
+    total = sum(wts)
+    t0, span = 0.12, max(0.5, voice_len - 0.1)
+    out, t = [], t0
+    for w, wt in zip(words, wts):
+        dt = span * wt / total
+        out.append((w, t, t + dt)); t += dt
+    return out
+
+
+# ---------- visual extras ----------
+def make_sprite(size):
+    a = np.zeros((size, size), dtype=np.float32)
+    c = (size - 1) / 2
+    yy, xx = np.mgrid[0:size, 0:size]
+    r = np.sqrt((xx - c) ** 2 + (yy - c) ** 2) / c
+    a = np.clip(1 - r, 0, 1) ** 2.2
+    rgba = np.zeros((size, size, 4), dtype=np.uint8)
+    rgba[..., 0] = 255; rgba[..., 1] = 244; rgba[..., 2] = 200
+    rgba[..., 3] = (a * 255).astype(np.uint8)
+    return Image.fromarray(rgba, "RGBA")
+
+
+def make_vignette():
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    r = np.sqrt(((xx - W / 2) / (W / 2)) ** 2 + ((yy - H / 2) / (H / 2)) ** 2) / 1.41
+    a = np.clip((r - 0.55) / 0.45, 0, 1) ** 1.8 * 120
+    return Image.fromarray(a.astype(np.uint8), "L")
+
+
+_RNG = random.Random(7)
+PARTICLES = [dict(x=_RNG.uniform(0, W), y=_RNG.uniform(0, H), sp=_RNG.uniform(40, 130),
+                  sz=_RNG.choice([16, 22, 30, 40]), ph=_RNG.uniform(0, 6.28), sw=_RNG.uniform(15, 45))
+             for _ in range(24)]
+SPRITES = {}
+VIGNETTE = None
+BLACK = None
+
+CAM = [  # (zoom0, zoom1, pan0, pan1, tilt0, tilt1)  pan/tilt -1..1
+    (1.00, 1.17, -0.3, 0.5, 0.0, 0.2),
+    (1.17, 1.02, 0.5, -0.4, 0.2, -0.2),
+    (1.02, 1.20, 0.0, 0.0, 0.5, -0.4),
+    (1.15, 1.00, -0.5, 0.4, -0.3, 0.3),
+]
+
+
+def camera_frame(base, idx, t, dur):
+    z0, z1, p0, p1, q0, q1 = CAM[idx % len(CAM)]
+    e = ease(t / dur)
+    z = z0 + (z1 - z0) * e
+    px = p0 + (p1 - p0) * e + 0.04 * math.sin(t * 2.1)     # halka handheld sway
+    py = q0 + (q1 - q0) * e + 0.04 * math.sin(t * 1.7 + 1)
+    bw, bh = W / z, H / z
+    sx, sy = (W - bw) / 2, (H - bh) / 2
+    left = sx + max(-1, min(1, px)) * sx
+    top = sy + max(-1, min(1, py)) * sy
+    return base.resize((W, H), Image.BICUBIC, box=(left, top, left + bw, top + bh))
+
+
+def draw_particles(frame, t):
+    for pt in PARTICLES:
+        y = (pt["y"] - pt["sp"] * t) % (H + 120) - 60
+        x = pt["x"] + pt["sw"] * math.sin(t * 1.3 + pt["ph"])
+        tw = 0.5 + 0.5 * math.sin(t * 3 + pt["ph"])
+        sz = max(8, int(pt["sz"] * (0.7 + 0.5 * tw)))
+        sp = SPRITES.setdefault(sz, make_sprite(sz))
+        frame.paste(sp, (int(x - sz / 2), int(y - sz / 2)), sp)
+
+
+def scene_frames(img_path, text, voice_len, idx, prev_last):
+    """Generator: is scene ki sab frames (PIL RGB) deta hai."""
+    global VIGNETTE, BLACK
+    if VIGNETTE is None:
+        VIGNETTE = make_vignette(); BLACK = Image.new("RGB", (W, H), (0, 0, 0))
     img = Image.open(img_path).convert("RGB")
     ratio = max(W / img.width, H / img.height)
-    img = img.resize((int(img.width * ratio), int(img.height * ratio)))
-    l, t = (img.width - W) // 2, (img.height - H) // 2
-    img.crop((l, t, l + W, t + H)).save(base_out)
+    img = img.resize((int(img.width * ratio) + 1, int(img.height * ratio) + 1), Image.LANCZOS)
+    l, tp = (img.width - W) // 2, (img.height - H) // 2
+    base = img.crop((l, tp, l + W, tp + H))
 
-    cap = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(cap)
-    font = ImageFont.truetype(find_font(), 64)
-    lines = wrap(d, text, font, W - 160)
-    lh = 92
-    box_h = lh * len(lines) + 70
-    y0 = H - 320 - box_h
-    d.rounded_rectangle((50, y0, W - 50, y0 + box_h), radius=40, fill=(0, 0, 0, 165))
-    y = y0 + 35
-    for ln in lines:
-        w = d.textlength(ln, font=font)
-        d.text(((W - w) / 2, y), ln, font=font, fill=(255, 235, 59, 255), stroke_width=2, stroke_fill=(0, 0, 0, 255))
-        y += lh
-    cap.save(cap_out)
+    dur = voice_len + 0.45
+    n = int(dur * FPS)
+    words = word_timeline(text, voice_len)
+    chunks, k = [], 0
+    for ch in split_chunks([w for w, _, _ in words]):
+        chunks.append((ch, words[k][1], words[k + len(ch) - 1][2], k)); k += len(ch)
+    cache = {}
+    TR = 9  # transition frames
+    for f in range(n):
+        t = f / FPS
+        frame = camera_frame(base, idx, t, dur)
+        draw_particles(frame, t + idx * 3.1)
+        frame.paste(BLACK, (0, 0), VIGNETTE)
+        for ch, ts, te, k0 in chunks:
+            if ts <= t <= te + 0.12:
+                active = -1
+                for j in range(len(ch)):
+                    if words[k0 + j][1] <= t < words[k0 + j][2]:
+                        active = j
+                key = (k0, active)
+                if key not in cache:
+                    cache[key] = render_caption(ch, active)
+                cap = cache[key]
+                sc = 0.78 + 0.22 * ease_out_back((t - ts) / 0.22)
+                if sc < 0.995 or sc > 1.005:
+                    cap = cap.resize((max(1, int(cap.width * sc)), max(1, int(cap.height * sc))), Image.BILINEAR)
+                frame.paste(cap, ((W - cap.width) // 2, int(CAP_CENTER_Y - cap.height / 2)), cap)
+                break
+        if prev_last is not None and f < TR:
+            frame = Image.blend(prev_last, frame, ease((f + 1) / TR))
+        yield frame
+
+
+# ---------- audio ----------
+def load_voice(mp3):
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(mp3), "-f", "s16le", "-ac", "1", "-ar", str(SR), "-"],
+                         capture_output=True, check=True).stdout
+    return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+
+
+def whoosh(d=0.4):
+    n = int(SR * d)
+    rng = np.random.default_rng(3)
+    noise = rng.standard_normal(n).astype(np.float32)
+    out = np.zeros(n, dtype=np.float32); y = 0.0
+    for i in range(n):                      # low-pass jiska cutoff sweep hota hai
+        a = 0.015 + 0.35 * (i / n)
+        y += a * (noise[i] - y); out[i] = y
+    env = np.sin(np.pi * np.linspace(0, 1, n)) ** 2
+    out = out * env
+    return out / (np.abs(out).max() + 1e-6) * 0.22
+
+
+def write_wav(path, x):
+    import wave
+    x = np.clip(x, -1, 1)
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(SR)
+        w.writeframes((x * 32767).astype(np.int16).tobytes())
+
+
+def render_reel(scenes, out_path, work):
+    """scenes = [{img, text, voice(np float32)}]; out_path = final mp4."""
+    durs = [len(s["voice"]) / SR + 0.45 for s in scenes]
+    total = int(sum(durs) * SR) + SR // 2
+    audio = np.zeros(total, dtype=np.float32)
+    wh = whoosh()
+    pos = 0.0
+    for i, (s, d) in enumerate(zip(scenes, durs)):
+        a = int(pos * SR)
+        audio[a:a + len(s["voice"])] += s["voice"]
+        if i > 0:
+            b = max(0, a - int(0.05 * SR))
+            audio[b:b + len(wh)] += wh[:max(0, total - b)]
+        pos += d
+    wav = Path(work) / "voice.wav"; write_wav(wav, audio)
+
+    music = sorted(glob.glob("music/*.mp3") + glob.glob("music/*.wav"))
+    cmd = ["ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{W}x{H}", "-r", str(FPS), "-i", "-",
+           "-i", str(wav)]
+    if music:
+        cmd += ["-stream_loop", "-1", "-i", random.choice(music),
+                "-filter_complex", "[2:a]volume=0.10[m];[1:a][m]amix=inputs=2:duration=first:dropout_transition=0[a]",
+                "-map", "0:v", "-map", "[a]"]
+    else:
+        cmd += ["-map", "0:v", "-map", "1:a"]
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "160k", "-shortest", str(out_path)]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
+    prev = None
+    for i, s in enumerate(scenes):
+        last = None
+        for fr in scene_frames(s["img"], s["text"], len(s["voice"]) / SR, i, prev):
+            proc.stdin.write(fr.tobytes()); last = fr
+        prev = last
+    proc.stdin.close()
+    if proc.wait() != 0:
+        raise RuntimeError("ffmpeg final render fail")
 
 
 async def tts(text, path):
-    await edge_tts.Communicate(text, VOICE, rate="-8%").save(str(path))
-
-
-def duration(path):
-    o = subprocess.check_output(["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                                 "-of", "default=nk=1:nw=1", str(path)])
-    return float(o)
-
-
-def render_scene(base, cap, audio, out, dur, idx):
-    frames = int(dur * 30)
-    zoom_in = idx % 2 == 0
-    z = "min(zoom+0.0007,1.18)" if zoom_in else "if(eq(on,1),1.18,max(zoom-0.0007,1.0))"
-    fc = (f"[0:v]scale=2160:3840,zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={frames}:s={W}x{H}:fps=30[v];"
-          f"[v][1:v]overlay=0:0:shortest=1,format=yuv420p[o]")
-    subprocess.run(["ffmpeg", "-y", "-i", str(base), "-loop", "1", "-i", str(cap), "-i", str(audio),
-                    "-filter_complex", fc, "-map", "[o]", "-map", "2:a", "-af", "apad", "-t", f"{dur:.2f}",
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-r", "30",
-                    "-c:a", "aac", "-ar", "44100", "-ac", "2", str(out)], check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    await edge_tts.Communicate(text, VOICE, rate="-5%").save(str(path))
 
 
 def build_reel(kind, script):
     work = OUT / kind; work.mkdir(exist_ok=True)
-    segs = []
     seed = random.randint(1, 10**6)
+    scenes = []
     for i, sc in enumerate(script["scenes"]):
-        img, base, cap = work / f"i{i}.jpg", work / f"b{i}.png", work / f"c{i}.png"
-        aud, seg = work / f"a{i}.mp3", work / f"s{i}.mp4"
+        img, aud = work / f"i{i}.jpg", work / f"a{i}.mp3"
         make_image(sc["image_prompt"], img, seed)       # same seed = character look thoda consistent
-        base_and_caption(img, sc["narration"], base, cap)
         asyncio.run(tts(sc["narration"], aud))
-        render_scene(base, cap, aud, seg, duration(aud) + 0.5, i)
-        segs.append(seg)
-    lst = work / "list.txt"
-    lst.write_text("".join(f"file '{s.resolve()}'\n" for s in segs))
+        scenes.append({"img": img, "text": sc["narration"], "voice": load_voice(aud)})
     final = OUT / f"{kind}.mp4"
-    subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(final)],
-                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    render_reel(scenes, final, work)
     return final
 
 
