@@ -11,6 +11,13 @@ on:
         description: "Scenes (14 = lagbhag 1.5-2 min)"
         required: false
         default: "14"
+  # Roz apne aap banane ke liye niche ki 2 line se '#' hata do (UTC time; 04:30 UTC = 10:00 AM IST)
+  # schedule:
+  #   - cron: "30 4 * * *"
+
+permissions:
+  contents: read
+  models: read   # free AI script (GitHub Models), Google ki zarurat nahi
 
 jobs:
   build:
@@ -32,6 +39,7 @@ jobs:
 
       - name: Generate video and send to Telegram
         env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
