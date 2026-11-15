@@ -34,6 +34,11 @@ OUT = Path("output")
 WORK = Path("work")
 
 TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.8-flash")
+SCRIPT_PROVIDERS = [p.strip() for p in os.getenv("SCRIPT_PROVIDERS", "github,gemini").split(",") if p.strip()]
+GITHUB_MODELS = [m.strip() for m in os.getenv(
+    "GITHUB_MODELS", "openai/gpt-4.1,openai/gpt-4o,openai/gpt-4o-mini,meta/Llama-3.3-70B-Instruct").split(",") if m.strip()]
+TTS_PROVIDERS = [p.strip() for p in os.getenv("TTS_PROVIDERS", "edge,piper").split(",") if p.strip()]
+PIPER_VOICE = os.getenv("PIPER_VOICE", "pratham")  # pratham / rohan (male), priyamvada (female)
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
 IMAGE_PROVIDERS = [p.strip() for p in os.getenv("IMAGE_PROVIDERS", "cloudflare,pollinations").split(",") if p.strip()]
 HF_MODEL_URL = os.getenv("HF_MODEL_URL", "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell")
@@ -61,8 +66,56 @@ def run(cmd, **kw):
 
 
 # --------------------------------------------------------------------------- script
+def parse_json(txt):
+    txt = re.sub(r"^```(?:json)?|```$", "", txt.strip(), flags=re.M).strip()
+    i, j = txt.find("{"), txt.rfind("}")
+    if i != -1 and j != -1:
+        txt = txt[i:j + 1]
+    try:
+        return json.loads(txt)
+    except json.JSONDecodeError:
+        return json.loads(re.sub(r",(\s*[}\]])", r"\1", txt))  # trailing commas
+
+
+def github_text(prompt):
+    """Free LLM via GitHub Models (uses the workflow's own GITHUB_TOKEN, no extra key)."""
+    tok = os.environ.get("GITHUB_TOKEN")
+    if not tok:
+        raise RuntimeError("GITHUB_TOKEN missing")
+    url = "https://models.github.ai/inference/chat/completions"
+    headers = {"Authorization": f"Bearer {tok}", "Content-Type": "application/json",
+               "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    for model in GITHUB_MODELS:
+        body = {"model": model, "temperature": 0.9, "max_tokens": 3800,
+                "messages": [{"role": "system", "content": "You output only one valid JSON object, nothing else."},
+                             {"role": "user", "content": prompt}]}
+        for attempt in range(2):
+            try:
+                r = requests.post(url, headers=headers, json=body, timeout=150)
+            except requests.exceptions.RequestException as e:
+                log(f"  github/{model}: network error: {str(e)[:150]}")
+                time.sleep(5)
+                continue
+            if r.status_code in (500, 502, 503):
+                log(f"  github/{model}: HTTP {r.status_code}")
+                time.sleep(8 * (attempt + 1))
+                continue
+            if r.status_code != 200:
+                log(f"  github/{model}: HTTP {r.status_code} {r.text[:300]}")
+                break  # 401/403 (permission), 404 (model), 429 (limit) -> next model
+            try:
+                data = parse_json(r.json()["choices"][0]["message"]["content"])
+                log(f"  script ready via github/{model}")
+                return data
+            except Exception as e:  # noqa: BLE001
+                log(f"  github/{model}: bad JSON ({str(e)[:100]}), retrying")
+    raise RuntimeError("GitHub Models failed")
+
+
 def gemini_text(prompt):
-    key = os.environ["GEMINI_API_KEY"]
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        raise RuntimeError("GEMINI_API_KEY missing")
     models = [TEXT_MODEL, "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-flash-latest"]
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -78,8 +131,8 @@ def gemini_text(prompt):
                 time.sleep(5)
                 continue
             if r.status_code == 429:
-                log(f"  {model}: HTTP 429 {r.text[:300]}")
-                break  # quota khatam: agla model try karo
+                log(f"  {model}: HTTP 429 {r.text[:200]}")
+                break
             if r.status_code in (500, 503):
                 log(f"  {model}: HTTP {r.status_code} {r.text[:200]}")
                 time.sleep(8 * (attempt + 1))
@@ -88,15 +141,24 @@ def gemini_text(prompt):
                 log(f"  {model}: HTTP {r.status_code} {r.text[:300]}")
                 break
             try:
-                txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                txt = re.sub(r"^```(?:json)?|```$", "", txt.strip(), flags=re.M).strip()
-                data = json.loads(txt)
+                data = parse_json(r.json()["candidates"][0]["content"]["parts"][0]["text"])
                 log(f"  script ready via {model}")
                 return data
             except Exception as e:  # noqa: BLE001
                 log(f"  {model}: bad response ({str(e)[:100]}), retrying")
-                continue
     raise RuntimeError("Gemini text failed on all models")
+
+
+def llm_json(prompt):
+    fns = {"github": github_text, "gemini": gemini_text}
+    last = None
+    for name in SCRIPT_PROVIDERS:
+        try:
+            return fns[name](prompt)
+        except Exception as e:  # noqa: BLE001
+            last = e
+            log(f"  script provider '{name}' failed: {str(e)[:150]}")
+    raise RuntimeError(f"all script providers failed: {last}")
 
 
 def write_script(topic, n):
@@ -119,7 +181,7 @@ def write_script(topic, n):
         '"characters":{"Name":"visual description"},'
         '"scenes":[{"narration":"...","image_prompt":"...","characters":["Name"]}]}'
     )
-    data = gemini_text(prompt)
+    data = llm_json(prompt)
     assert data.get("scenes"), "empty script"
     return data
 
@@ -237,22 +299,74 @@ def placeholder_image(idx, path):
 
 
 # --------------------------------------------------------------------------- voice
-async def _tts(text, path):
+def clean_text(t):
+    t = re.sub(r"[\*_#\"“”‘’`~|<>\[\]{}]", "", t)
+    t = t.replace("…", "...").replace("\n", " ")
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+async def _edge(text, path, voice, rate):
     import edge_tts
 
-    await edge_tts.Communicate(text, VOICE, rate=TTS_RATE).save(str(path))
+    kw = {"rate": rate} if rate else {}
+    await edge_tts.Communicate(text, voice, **kw).save(str(path))
+
+
+def tts_edge(text, path):
+    tries = [(VOICE, TTS_RATE), (VOICE, None), ("hi-IN-SwaraNeural", None), (VOICE, None)]
+    for n, (voice, rate) in enumerate(tries, 1):
+        try:
+            asyncio.run(_edge(text, path, voice, rate))
+            if Path(path).exists() and Path(path).stat().st_size > 1000:
+                return
+        except Exception as e:  # noqa: BLE001
+            log(f"  edge-tts try {n} ({voice}) failed: {str(e)[:110]}")
+        time.sleep(2 * n)
+    raise RuntimeError("edge-tts failed")
+
+
+def tts_piper(text, path):
+    """Offline Hindi voice (Piper). Model is downloaded once from Hugging Face."""
+    import wave
+
+    from piper import PiperVoice
+
+    mdir = Path("work/piper")
+    mdir.mkdir(parents=True, exist_ok=True)
+    name = f"hi_IN-{PIPER_VOICE}-medium"
+    base = f"https://huggingface.co/rhasspy/piper-voices/resolve/main/hi/hi_IN/{PIPER_VOICE}/medium/{name}"
+    for ext in (".onnx", ".onnx.json"):
+        f = mdir / (name + ext)
+        if not f.exists():
+            log(f"  downloading piper voice {name}{ext}")
+            r = requests.get(base + ext, timeout=300)
+            r.raise_for_status()
+            f.write_bytes(r.content)
+    voice = PiperVoice.load(str(mdir / (name + ".onnx")), config_path=str(mdir / (name + ".onnx.json")))
+    wav = Path(path).with_suffix(".wav")
+    with wave.open(str(wav), "wb") as wf:
+        if hasattr(voice, "synthesize_wav"):
+            voice.synthesize_wav(text, wf)
+        else:
+            voice.synthesize(text, wf)
+    run(["ffmpeg", "-y", "-i", str(wav), "-q:a", "4", str(path)])
+    wav.unlink()
 
 
 def make_voice(text, path):
-    for attempt in range(4):
+    text = clean_text(text)
+    fns = {"edge": tts_edge, "piper": tts_piper}
+    last = None
+    for name in TTS_PROVIDERS:
         try:
-            asyncio.run(_tts(text, path))
-            if Path(path).stat().st_size > 1000:
-                return
+            fns[name](text, path)
+            log(f"  voice: {name} ok")
+            return
         except Exception as e:  # noqa: BLE001
-            log(f"  tts attempt {attempt + 1} failed: {str(e)[:120]}")
-        time.sleep(3 * (attempt + 1))
-    raise RuntimeError("TTS failed")
+            last = e
+            log(f"  voice provider '{name}' failed: {str(e)[:150]}")
+    raise RuntimeError(f"TTS failed: {last}")
 
 
 def silent_voice(path, secs=3.0):
