@@ -63,21 +63,26 @@ def run(cmd, **kw):
 # --------------------------------------------------------------------------- script
 def gemini_text(prompt):
     key = os.environ["GEMINI_API_KEY"]
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{TEXT_MODEL}:generateContent?key={key}"
+    models = [TEXT_MODEL, "gemini-2.5-flash", "gemini-2.5-flash-lite"]
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0.9},
     }
-    for attempt in range(5):
-        r = requests.post(url, json=body, timeout=120)
-        if r.status_code in (429, 500, 503):
-            time.sleep(10 * (attempt + 1))
-            continue
-        r.raise_for_status()
-        txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-        txt = re.sub(r"^```(?:json)?|```$", "", txt.strip(), flags=re.M).strip()
-        return json.loads(txt)
-    raise RuntimeError("Gemini text failed after retries")
+    for model in dict.fromkeys(models):
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
+        for attempt in range(3):
+            r = requests.post(url, json=body, timeout=120)
+            if r.status_code in (429, 500, 503):
+                log(f"  {model}: HTTP {r.status_code} {r.text[:300]}")
+                time.sleep(8 * (attempt + 1))
+                continue
+            if r.status_code != 200:
+                log(f"  {model}: HTTP {r.status_code} {r.text[:300]}")
+                break
+            txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+            txt = re.sub(r"^```(?:json)?|```$", "", txt.strip(), flags=re.M).strip()
+            return json.loads(txt)
+    raise RuntimeError("Gemini text failed on all models")
 
 
 def write_script(topic, n):
