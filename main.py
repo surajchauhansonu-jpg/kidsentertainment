@@ -35,7 +35,7 @@ WORK = Path("work")
 
 TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.8-flash")
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
-IMAGE_PROVIDERS = [p.strip() for p in os.getenv("IMAGE_PROVIDERS", "pollinations,huggingface,gemini").split(",") if p.strip()]
+IMAGE_PROVIDERS = [p.strip() for p in os.getenv("IMAGE_PROVIDERS", "cloudflare,pollinations").split(",") if p.strip()]
 HF_MODEL_URL = os.getenv("HF_MODEL_URL", "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell")
 VOICE = os.getenv("TTS_VOICE", "hi-IN-MadhurNeural")
 TTS_RATE = os.getenv("TTS_RATE", "-5%")
@@ -158,7 +158,21 @@ def img_gemini(prompt, seed):
     raise RuntimeError("no image in Gemini response")
 
 
-PROVIDER_FN = {"pollinations": img_pollinations, "huggingface": img_huggingface, "gemini": img_gemini}
+def img_cloudflare(prompt, seed):
+    import base64
+
+    acc, tok = os.environ["CF_ACCOUNT_ID"], os.environ["CF_API_TOKEN"]
+    url = f"https://api.cloudflare.com/client/v4/accounts/{acc}/ai/run/@cf/black-forest-labs/flux-1-schnell"
+    r = requests.post(url, headers={"Authorization": f"Bearer {tok}"},
+                      json={"prompt": prompt[:2000], "steps": 6}, timeout=180)
+    if r.status_code != 200:
+        raise requests.HTTPError(f"{r.status_code} {r.text[:250]}", response=r)
+    if r.headers.get("content-type", "").startswith("image/"):
+        return _valid_image(r.content)
+    return _valid_image(base64.b64decode(r.json()["result"]["image"]))
+
+
+PROVIDER_FN = {"cloudflare": img_cloudflare, "pollinations": img_pollinations, "huggingface": img_huggingface, "gemini": img_gemini}
 
 
 def make_image(prompt, idx, path):
@@ -166,6 +180,9 @@ def make_image(prompt, idx, path):
     last = None
     for name in IMAGE_PROVIDERS:
         if name == "huggingface" and not os.getenv("HF_TOKEN"):
+            continue
+        if name == "cloudflare" and not (os.getenv("CF_ACCOUNT_ID") and os.getenv("CF_API_TOKEN")):
+            log("  cloudflare keys missing, skipping")
             continue
         for attempt in range(3):
             try:
@@ -175,7 +192,10 @@ def make_image(prompt, idx, path):
                 return
             except Exception as e:  # noqa: BLE001
                 last = e
-                log(f"  image {idx}: {name} attempt {attempt + 1} failed: {str(e)[:120]}")
+                log(f"  image {idx}: {name} attempt {attempt + 1} failed: {str(e)[:250]}")
+                code = getattr(getattr(e, "response", None), "status_code", None)
+                if code in (400, 401, 402, 403, 404, 410, 429):
+                    break  # retry ka fayda nahi (quota / galat key / band endpoint)
                 time.sleep(4 * (attempt + 1))
     raise RuntimeError(f"all image providers failed: {last}")
 
@@ -381,7 +401,15 @@ def main():
         else:
             who = "; ".join(f"{c}: {chars[c]}" for c in sc.get("characters", []) if c in chars)
             prompt = f"{sc['image_prompt']}. Characters: {who}. Style: {STYLE}"
-            make_image(prompt, i + 1, img)
+            try:
+                make_image(prompt, i + 1, img)
+            except Exception as e:  # noqa: BLE001
+                prev = WORK / f"s{i - 1}.jpg"
+                if i > 0 and prev.exists():
+                    log(f"  scene {i + 1}: image fail, pichli scene ki image reuse kar raha hoon")
+                    img.write_bytes(prev.read_bytes())
+                else:
+                    raise
             make_voice(sc["narration"], aud)
             time.sleep(2)
         total += build_clip(img, aud, i, clip)
