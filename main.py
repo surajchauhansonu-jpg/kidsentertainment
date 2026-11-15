@@ -70,11 +70,16 @@ def gemini_text(prompt):
     }
     for model in dict.fromkeys(models):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
-        for attempt in range(3):
-            r = requests.post(url, json=body, timeout=120)
+        for attempt in range(2):
+            try:
+                r = requests.post(url, json=body, timeout=150)
+            except requests.exceptions.RequestException as e:
+                log(f"  {model}: network/timeout error: {str(e)[:150]}")
+                time.sleep(5)
+                continue
             if r.status_code == 429:
                 log(f"  {model}: HTTP 429 {r.text[:300]}")
-                break  # quota khatam: retry ka fayda nahi, agla model try karo
+                break  # quota khatam: agla model try karo
             if r.status_code in (500, 503):
                 log(f"  {model}: HTTP {r.status_code} {r.text[:200]}")
                 time.sleep(8 * (attempt + 1))
@@ -82,9 +87,15 @@ def gemini_text(prompt):
             if r.status_code != 200:
                 log(f"  {model}: HTTP {r.status_code} {r.text[:300]}")
                 break
-            txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-            txt = re.sub(r"^```(?:json)?|```$", "", txt.strip(), flags=re.M).strip()
-            return json.loads(txt)
+            try:
+                txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                txt = re.sub(r"^```(?:json)?|```$", "", txt.strip(), flags=re.M).strip()
+                data = json.loads(txt)
+                log(f"  script ready via {model}")
+                return data
+            except Exception as e:  # noqa: BLE001
+                log(f"  {model}: bad response ({str(e)[:100]}), retrying")
+                continue
     raise RuntimeError("Gemini text failed on all models")
 
 
