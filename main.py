@@ -31,6 +31,7 @@ import requests
 
 import animate
 import audiofx
+import rig
 from PIL import Image, ImageDraw, ImageFilter
 
 W, H, FPS = 720, 1280, 30
@@ -50,6 +51,28 @@ VOICE = os.getenv("TTS_VOICE", "hi-IN-MadhurNeural")
 TTS_RATE = os.getenv("TTS_RATE", "-6%")
 TTS_PITCH = os.getenv("TTS_PITCH", "-3Hz")  # thodi bhari, dramatic awaaz
 CACHE = Path("models_cache")
+CHAR_DIR = Path("characters")
+POS = {"left": (0.30, 0.93), "center": (0.50, 0.93), "right": (0.70, 0.93)}
+_ACTORS = {}
+
+
+def known_characters():
+    return sorted(p.stem for p in CHAR_DIR.glob("*.png")) if CHAR_DIR.exists() else []
+
+
+def char_descriptions():
+    f = Path("characters.json")
+    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+
+
+def get_actor(name, height_px):
+    key = (name.lower(), height_px)
+    if key not in _ACTORS:
+        match = [p for p in CHAR_DIR.glob("*.png") if p.stem.lower() == name.lower()]
+        if not match:
+            return None
+        _ACTORS[key] = rig.Actor(match[0], height_px)
+    return _ACTORS[key]
 STYLE = os.getenv(
     "STYLE",
     "flat 2D vector illustration, Indian mythology Mahabharat, cutout puppet style characters, "
@@ -167,7 +190,14 @@ def llm_json(prompt):
     raise RuntimeError(f"all script providers failed: {last}")
 
 
-def write_script(topic, n):
+def write_script(topic, n, rigged=()):
+    rig_rule = (
+        f"- RIGGED CHARACTERS available (exact names): {', '.join(rigged)}. For a scene where one or two of them "
+        "stand and speak/react, set mode='rig', give 'background_prompt' (English, the EMPTY environment only: "
+        "no people), and 'actors': [{name, pos: left|center|right, action: talk|idle|angry|shock|walk}]. "
+        "Use at least 60% rig scenes when possible. For landscapes, battles, objects, silhouettes, or characters "
+        "not in the list use mode='plate' (normal image_prompt).\n"
+    ) if rigged else ""
     prompt = (
         "You are a scriptwriter for viral Hindi short-form animated storytelling videos on Indian mythology "
         "(Mahabharat, Ramayan, Puranas).\n"
@@ -187,10 +217,12 @@ def write_script(topic, n):
         "landscape/sky/battlefield. Use a face close-up in AT MOST 3 scenes. "
         "Prefer shots where the face is small or hidden, so the character stays consistent.\n"
         "- scene.characters: list of character names appearing in that scene.\n"
+        + rig_rule +
         "- scene.energy: 1 = calm, 2 = tense, 3 = action/shock (controls camera shake and sound).\n"
         'Return ONLY JSON: {"title":"(Hindi)","description":"(Hindi, 2 lines)","hashtags":["#..."],'
         '"characters":{"Name":"visual description"},'
-        '"scenes":[{"narration":"...","image_prompt":"...","characters":["Name"],"energy":2}]}'
+        '"scenes":[{"mode":"plate|rig","narration":"...","image_prompt":"...","background_prompt":"(rig only)",'
+        '"actors":[{"name":"Arjun","pos":"left","action":"talk"}],"characters":["Name"],"energy":2}]}'
     )
     data = llm_json(prompt)
     assert data.get("scenes"), "empty script"
@@ -296,6 +328,20 @@ def save_cover(data, path, scale=2):
     im.crop((left, top, left + tw, top + th)).save(path, quality=95)
 
 
+def make_dummy_character(path):
+    from PIL import ImageDraw
+
+    im = Image.new("RGBA", (400, 900), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
+    d.ellipse([140, 20, 260, 160], fill=(230, 180, 120, 255))
+    d.rectangle([180, 150, 220, 200], fill=(230, 180, 120, 255))
+    d.rectangle([130, 195, 270, 480], fill=(40, 90, 200, 255))
+    d.rectangle([75, 200, 125, 470], fill=(230, 180, 120, 255))
+    d.rectangle([275, 200, 325, 470], fill=(230, 180, 120, 255))
+    d.polygon([(130, 470), (270, 470), (300, 880), (100, 880)], fill=(250, 190, 40, 255))
+    im.save(path)
+
+
 def placeholder_image(idx, path):
     im = Image.new("RGB", (W, H))
     d = ImageDraw.Draw(im)
@@ -394,14 +440,15 @@ def duration(path):
 
 
 # --------------------------------------------------------------------------- video
-def build_clip(img, audio, idx, out, energy=2, use_model=True):
+def build_clip(img, audio, idx, out, energy=2, use_model=True, actors=None):
     """Animated 2.5D clip + voice. Returns (duration, internal_cut_time_or_None)."""
     pad = 0.3
     dur = max(duration(audio) + pad, 3.0)
     src = cv2.imread(str(img))
     depth = animate.get_depth(src, cache_dir=CACHE, use_model=use_model)
     vid = WORK / f"s{idx}_v.mp4"
-    cut = animate.render_scene(src, depth, dur, idx, vid, energy=energy)
+    env = animate.voice_env(audio, int(math.ceil(dur * FPS)) + 2)
+    cut = animate.render_scene(src, depth, dur, idx, vid, energy=energy, actors=actors, env=env)
     run([
         "ffmpeg", "-y", "-i", str(vid), "-i", str(audio),
         "-filter_complex", f"[1:a]apad=pad_dur={pad + 3},aresample=44100,aformat=channel_layouts=stereo[a]",
@@ -440,7 +487,7 @@ def make_particles(path, seconds=20, n=90):
     p.wait()
 
 
-def assemble(clips, total, out, scene_starts, cut_times):
+def assemble(clips, total, out, scene_starts, cut_times, energies=None):
     lst = WORK / "clips.txt"
     lst.write_text("".join(f"file '{c.resolve()}'\n" for c in clips))
     joined = WORK / "joined.mp4"
@@ -448,18 +495,19 @@ def assemble(clips, total, out, scene_starts, cut_times):
 
     particles = WORK / "particles.mp4"
     make_particles(particles)
-    bed, sfx = audiofx.build_audio_assets(total, scene_starts, cut_times, WORK)
+    bed, sfx = audiofx.build_audio_assets(total, scene_starts, cut_times, WORK, energies=energies)
 
     fv = ("[0:v]format=gbrp[a];[1:v]format=gbrp[b];"
           "[a][b]blend=all_mode=screen:all_opacity=0.55,format=yuv420p,vignette=PI/6,"
           f"eq=contrast=1.05:saturation=1.08,fade=t=in:st=0:d=0.4,fade=t=out:st={total - 0.8:.2f}:d=0.8[v];")
-    fa = ("[0:a]highpass=f=70,equalizer=f=150:t=q:w=1:g=2.5,equalizer=f=3000:t=q:w=1:g=2,"
-          "acompressor=threshold=0.1:ratio=3:attack=5:release=120:makeup=2,"
-          "aecho=0.8:0.85:50:0.15,asplit=2[vo][sc];"
-          "[2:a]volume=0.75[bed];[bed][sc]sidechaincompress=threshold=0.02:ratio=6:attack=15:release=350[duck];"
-          "[3:a]volume=0.8[fx];"
+    fa = ("[0:a]highpass=f=75,equalizer=f=110:t=q:w=1:g=3.5,equalizer=f=260:t=q:w=1:g=-2,"
+          "equalizer=f=3200:t=q:w=1:g=3,equalizer=f=7500:t=q:w=1.5:g=1.5,"
+          "acompressor=threshold=0.08:ratio=4:attack=4:release=100:makeup=3,"
+          "aecho=0.8:0.88:70|140|230:0.22|0.14|0.08,asplit=2[vo][sc];"
+          "[2:a]volume=1.05[bed];[bed][sc]sidechaincompress=threshold=0.03:ratio=4:attack=12:release=300[duck];"
+          "[3:a]volume=0.9[fx];"
           "[vo][duck][fx]amix=inputs=3:duration=first:normalize=0,alimiter=limit=0.95,"
-          f"loudnorm=I=-15:TP=-1.5:LRA=11,afade=t=out:st={total - 1.0:.2f}:d=1.0[a]")
+          f"loudnorm=I=-14:TP=-1.5:LRA=9,afade=t=out:st={total - 1.0:.2f}:d=1.0[a]")
     run(["ffmpeg", "-y", "-i", str(joined), "-stream_loop", "-1", "-i", str(particles),
          "-i", str(bed), "-i", str(sfx),
          "-filter_complex", fv + fa, "-map", "[v]", "-map", "[a]", "-t", f"{total:.2f}",
@@ -515,21 +563,49 @@ def main():
         topic = pick_topic()
         n = int(os.getenv("SCENES", "22"))
         log(f"Topic: {topic} | scenes: {n}")
-        meta = write_script(topic, n)
+        meta = write_script(topic, n, known_characters())
     (OUT / "script.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
     clips, total = [], 0.0
     scene_starts, cut_times = [], []
-    chars = meta.get("characters", {})
+    chars = {**meta.get("characters", {}), **char_descriptions()}  # fixed descriptions win -> same look everywhere
+    energies = []
+    if dry:
+        CHAR_DIR.mkdir(exist_ok=True)
+        make_dummy_character(CHAR_DIR / "Testman.png")
     for i, sc in enumerate(meta["scenes"]):
         log(f"Scene {i + 1}/{len(meta['scenes'])}")
         img, aud, clip = WORK / f"s{i}.jpg", WORK / f"s{i}.mp3", WORK / f"s{i}.mp4"
+        if dry and i == 1:
+            sc.update(mode="rig", actors=[{"name": "Testman", "pos": "left", "action": "talk"},
+                                          {"name": "Testman", "pos": "right", "action": "angry"}])
+
+        # ---- rigged characters (same face every time) --------------------------------------------
+        actors = []
+        if sc.get("mode") == "rig":
+            acts = (sc.get("actors") or [])[:2]
+            hpx = int((0.56 if len(acts) > 1 else 0.64) * H)
+            for k, a_ in enumerate(acts):
+                ac = get_actor(str(a_.get("name", "")), hpx)
+                if ac is None:
+                    continue
+                pos = a_.get("pos", "center") if len(acts) == 1 else ("left", "right")[k]
+                actors.append({"actor": ac, "pos": POS.get(pos, POS["center"]), "flip": pos == "right",
+                               "action": a_.get("action", "talk"), "seed": k + i})
+            if len(actors) != len(acts):
+                actors = []  # a name had no rig -> fall back to a normal plate scene
+        rigged = bool(actors)
+
         if dry:
             placeholder_image(i, img)
             silent_voice(aud, 4.0 + (i % 2))
         else:
-            who = "; ".join(f"{c}: {chars[c]}" for c in sc.get("characters", []) if c in chars)
-            prompt = f"{sc['image_prompt']}. Characters: {who}. Style: {STYLE}"
+            if rigged:
+                bg = sc.get("background_prompt") or sc.get("image_prompt", "")
+                prompt = f"{bg}. Empty environment, no people, no characters, no figures. Style: {STYLE}"
+            else:
+                who = "; ".join(f"{c}: {chars[c]}" for c in sc.get("characters", []) if c in chars)
+                prompt = f"{sc['image_prompt']}. Characters: {who}. Style: {STYLE}"
             try:
                 make_image(prompt, i + 1, img)
             except Exception as e:  # noqa: BLE001
@@ -542,15 +618,16 @@ def main():
             make_voice(sc["narration"], aud)
             time.sleep(2)
         energy = int(sc.get("energy", 2) or 2)
+        energies.append(energy)
         scene_starts.append(total)
-        dur, cut = build_clip(img, aud, i, clip, energy=energy, use_model=not dry)
+        dur, cut = build_clip(img, aud, i, clip, energy=energy, use_model=not dry, actors=actors or None)
         if cut:
             cut_times.append(total + cut)
         total += dur
         clips.append(clip)
 
     final = OUT / "final.mp4"
-    assemble(clips, total, final, scene_starts, cut_times)
+    assemble(clips, total, final, scene_starts, cut_times, energies)
     log(f"Done: {final} ({final.stat().st_size / 1e6:.1f} MB, {total:.0f}s)")
 
     if dry:

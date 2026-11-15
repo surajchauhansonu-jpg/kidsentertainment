@@ -60,6 +60,15 @@ def _whoosh(dur=0.75, amp=0.8):
     return sweep * env * amp
 
 
+def _riser(dur=1.6, amp=0.6):
+    n = int(SR * dur)
+    t = np.linspace(0, 1, n, dtype=np.float32)
+    noise = _bandpass_noise(n, 1200, 9000, 11) * t ** 2.2
+    f = 180 + 1300 * t ** 2
+    sweep = np.sin(2 * np.pi * np.cumsum(f) / SR).astype(np.float32) * t ** 2.5 * 0.5
+    return (noise + sweep) * amp * np.minimum(1, (1 - t) * 14 + 0.0 + (t > 0.97) * 0)
+
+
 def _place(buf, clip, at, gain=1.0, pan=0.0):
     i = int(at * SR)
     if i >= buf.shape[0]:
@@ -70,11 +79,18 @@ def _place(buf, clip, at, gain=1.0, pan=0.0):
     buf[i:j, 1] += seg * (1 + min(pan, 0))
 
 
-def make_sfx(total, scene_starts, cut_times, out_path):
+def make_sfx(total, scene_starts, cut_times, out_path, energies=None):
     buf = np.zeros((int(total * SR) + SR, 2), np.float32)
     boom_big, boom_small = _boom(1.3, 130, 36, 1.0), _boom(0.6, 170, 60, 0.8)
     wh = _whoosh()
+    ris = _riser()
+    hit = _boom(2.2, 150, 32, 1.0)
     for k, t in enumerate(scene_starts):
+        en = (energies[k] if energies and k < len(energies) else 2)
+        if en >= 3 and t > 1.6:
+            _place(buf, ris, t - 1.6, 0.55)           # tension riser into the shock scene
+        if k == 0:
+            _place(buf, hit, 0.0, 0.9)                # opening hit
         _place(buf, wh, max(0.0, t - 0.28), 0.55, pan=0.2 if k % 2 else -0.2)  # whoosh leads into the cut
         _place(buf, boom_big if k % 3 == 0 else boom_small, t, 0.8 if k % 3 == 0 else 0.5)
     for t in cut_times:
@@ -83,8 +99,24 @@ def make_sfx(total, scene_starts, cut_times, out_path):
     _write_wav(out_path, buf[: int(total * SR)] * 0.9)
 
 
-def make_music(total, out_path, seed=7):
+def _intensity(total, scene_starts, energies):
     n = int(total * SR)
+    if not energies:
+        return np.ones(n, np.float32)
+    xs = list(scene_starts) + [total]
+    pts_t, pts_v = [], []
+    for k, e in enumerate(energies):
+        v = {1: 0.45, 2: 0.75, 3: 1.0}.get(int(e), 0.75)
+        pts_t += [xs[k] + 0.3, xs[k + 1] - 0.3]
+        pts_v += [v, v]
+    env = np.interp(np.arange(n) / SR, pts_t, pts_v).astype(np.float32)
+    k = int(1.2 * SR)
+    return np.convolve(env, np.ones(k, np.float32) / k, mode="same")
+
+
+def make_music(total, out_path, scene_starts=None, energies=None, seed=7):
+    n = int(total * SR)
+    inten = _intensity(total, scene_starts, energies)
     t = np.arange(n, dtype=np.float32) / SR
     rng = random.Random(seed)
     L = np.zeros(n, np.float32)
@@ -105,7 +137,7 @@ def make_music(total, out_path, seed=7):
     w_d = 0.5 + 0.5 * np.sin(2 * np.pi * t / (2 * sec))
     d_main = drone(73.42, lfo * w_d)           # D2
     d_tense = drone(77.78, lfo * (1 - w_d))    # Eb2 (b2 tension)
-    pad = (d_main + d_tense) * 1.6
+    pad = (d_main + d_tense) * 1.6 * (0.8 + 0.4 * inten)
     L += pad
     R += pad * 0.95
 
@@ -127,8 +159,8 @@ def make_music(total, out_path, seed=7):
         if tt > 8:
             _place(perc, tick, tt, 0.18 if k % 2 == 0 else 0.1, pan=0.3 if k % 2 else -0.3)
         k += 1
-    L += perc[:n, 0]
-    R += perc[:n, 1]
+    L += perc[:n, 0] * (0.45 + 0.75 * inten)
+    R += perc[:n, 1] * (0.45 + 0.75 * inten)
 
     # --- temple-bell notes
     notes = [587.33, 622.25, 698.46, 880.0, 932.33]
@@ -169,10 +201,10 @@ def music_from_folder(total, out_path, folder="assets/music"):
     return True
 
 
-def build_audio_assets(total, scene_starts, cut_times, workdir, music_dir="assets/music"):
+def build_audio_assets(total, scene_starts, cut_times, workdir, music_dir="assets/music", energies=None):
     workdir = Path(workdir)
     bed, sfx = workdir / "bed.wav", workdir / "sfx.wav"
     if not music_from_folder(total, bed, music_dir):
-        make_music(total, bed)
-    make_sfx(total, scene_starts, cut_times, sfx)
+        make_music(total, bed, scene_starts, energies)
+    make_sfx(total, scene_starts, cut_times, sfx, energies)
     return bed, sfx

@@ -31,3 +31,17 @@ Sab kuch GitHub Actions me chalta hai, tumhare PC ki zarurat nahi.
   Pollinations, phir HuggingFace chalta hai. Quality aur character consistency har video me thodi alag ho sakti hai.
 - Mythology ka content: script publish karne se pehle ek baar khud padh lo, AI galti kar sakta hai.
 - Telegram bot 50 MB tak ki file bhejta hai, tool khud size chhota kar leta hai.
+
+## v2: animation + audio (kya badla)
+- Har image ka depth map (Depth Anything V2, free) nikalta hai -> 3D parallax camera, mid-scene punch-in cut, handheld shake, glow, flicker.
+- Audio: cinematic drone + dhol pulse + bells (khud ban jaata hai) ya `assets/music/` ki tumhari music, har cut pe whoosh/boom, voice pe EQ + compression, voice ke time music neeche (ducking).
+- Color tint bug fix (pehle video pink/purple ho jata tha).
+- Pehli run me depth model (~120 MB) download hota hai, uske baad cache se.
+
+## v3: rigged characters (har scene me wahi chehra)
+1. Ek baar: Actions -> **Make Characters (ek baar)** -> names me `Krishna,Arjun,Karna` (ya `all`) -> Run.
+   Har character ke 4 candidates banenge, behtareen auto-select hoga aur Telegram pe contact sheet aayegi.
+   Dusra pasand ho to dobara run karo, `pick` me `Arjun=2` likho.
+2. Characters `characters/` folder me save ho jate hain. Naya character jodna ho to `characters.json` me line add karo.
+3. Phir normal **Make Video** chalao: jin scenes me character bolta/khada hai wahan wo rig hoke chalta hai
+   (saans, sar hilna, haath, kapde ka hilna, voice ke saath sync), baaki scenes (jung, yuddh, hathiyar) normal image + 3D camera.

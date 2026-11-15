@@ -14,6 +14,8 @@ import cv2
 import numpy as np
 import requests
 
+import rig
+
 W, H, FPS = 720, 1280, 30
 DEPTH_URL = "https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model.onnx"
 _SESSION = {"s": None, "failed": False}
@@ -106,8 +108,26 @@ def plan_shots(idx, dur, energy):
     return [s1, s2]
 
 
+# --------------------------------------------------------------------------- voice envelope
+def voice_env(audio_path, n_frames):
+    """Loudness (0..1) of the narration per video frame -> drives head nods, gestures and camera pulses."""
+    raw = subprocess.run(["ffmpeg", "-v", "error", "-i", str(audio_path), "-ac", "1", "-ar", "16000", "-f", "s16le", "-"],
+                         capture_output=True).stdout
+    x = np.frombuffer(raw, np.int16).astype(np.float32) / 32768 if raw else np.zeros(1600, np.float32)
+    hop = 16000 // FPS
+    k = len(x) // hop
+    rms = np.sqrt(np.mean(x[: k * hop].reshape(k, hop) ** 2, axis=1)) if k else np.zeros(1)
+    rms = np.clip(rms / (np.percentile(rms, 95) + 1e-6), 0, 1)
+    out, v = np.zeros(n_frames, np.float32), 0.0
+    for i in range(n_frames):
+        r = rms[i] if i < len(rms) else 0.0
+        v += (r - v) * (0.5 if r > v else 0.18)  # fast attack, slow release
+        out[i] = v
+    return out
+
+
 # --------------------------------------------------------------------------- render
-def render_scene(src_bgr, depth, dur, idx, out_path, energy=2):
+def render_scene(src_bgr, depth, dur, idx, out_path, energy=2, actors=None, env=None):
     """Renders a silent animated clip. Returns the time (s) of the internal cut, or None."""
     sh, sw = src_bgr.shape[:2]
     sx, sy = sw / W, sh / H
@@ -142,6 +162,8 @@ def render_scene(src_bgr, depth, dur, idx, out_path, energy=2):
 
         # punch-in at the start of each shot (hard-cut feel), decays quickly
         z *= 1 + 0.10 * math.exp(-local / 0.14)
+        ev = float(env[min(f, len(env) - 1)]) if env is not None and len(env) else 0.0
+        z *= 1 + 0.007 * ev * (0.6 + 0.4 * energy)  # camera pulses with the voice
         # breathing + handheld
         z *= 1 + 0.004 * math.sin(2 * math.pi * 0.45 * t + ph[0])
         fx += shake * (1.4 * math.sin(2 * math.pi * 1.1 * t + ph[1]) + 0.7 * math.sin(2 * math.pi * 2.7 * t + ph[2]))
@@ -151,11 +173,22 @@ def render_scene(src_bgr, depth, dur, idx, out_path, energy=2):
         my = (fy + (V - fy) / z + oy * Dm) * sy
         out = cv2.remap(src_bgr, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
 
+        fl = out.astype(np.float32)
+        for k_, ac in enumerate(actors or []):
+            px, py = ac["pos"][0] * W, ac["pos"][1] * H
+            sxp = fx + z * (px - fx) - z * ox * 0.17
+            syp = fy + z * (py - fy) - z * oy * 0.17
+            pop = ease(t / 0.35)
+            scale = z * (0.88 + 0.12 * pop + 0.05 * math.sin(math.pi * min(t / 0.35, 1)))
+            sp = ac["actor"].pose(t, env=ev, action=ac.get("action", "talk"), energy=energy, seed=ac.get("seed", k_))
+            bob = 2.5 * math.sin(2 * math.pi * 0.55 * t + k_) + 5 * ev
+            fl = rig.composite(fl, sp, ac["actor"].feet_anchor(), (sxp, syp), scale, flip=ac.get("flip", False), dy=-bob)
+
         # bloom glow
-        sm = cv2.resize(out, (W // 4, H // 4), interpolation=cv2.INTER_AREA).astype(np.float32)
+        sm = cv2.resize(np.clip(fl, 0, 255), (W // 4, H // 4), interpolation=cv2.INTER_AREA)
         bright = np.clip(sm - 165, 0, None) * 1.6
         bloom = cv2.resize(cv2.GaussianBlur(bright, (0, 0), 7), (W, H), interpolation=cv2.INTER_LINEAR)
-        fl = out.astype(np.float32) + bloom * 0.55
+        fl = fl + bloom * 0.55
 
         # flickering light + flash on cuts
         gain = 1 + 0.025 * math.sin(2 * math.pi * 3.1 * t + ph[5]) + 0.015 * math.sin(2 * math.pi * 7.3 * t + ph[0])
