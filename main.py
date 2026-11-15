@@ -33,7 +33,7 @@ W, H, FPS = 720, 1280, 30
 OUT = Path("output")
 WORK = Path("work")
 
-TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-flash-latest")
+TEXT_MODEL = os.getenv("GEMINI_TEXT_MODEL", "gemini-3.8-flash")
 GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
 IMAGE_PROVIDERS = [p.strip() for p in os.getenv("IMAGE_PROVIDERS", "pollinations,huggingface,gemini").split(",") if p.strip()]
 HF_MODEL_URL = os.getenv("HF_MODEL_URL", "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell")
@@ -63,7 +63,7 @@ def run(cmd, **kw):
 # --------------------------------------------------------------------------- script
 def gemini_text(prompt):
     key = os.environ["GEMINI_API_KEY"]
-    models = [TEXT_MODEL, "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+    models = [TEXT_MODEL, "gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-flash-latest"]
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0.9},
@@ -72,8 +72,11 @@ def gemini_text(prompt):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
         for attempt in range(3):
             r = requests.post(url, json=body, timeout=120)
-            if r.status_code in (429, 500, 503):
-                log(f"  {model}: HTTP {r.status_code} {r.text[:300]}")
+            if r.status_code == 429:
+                log(f"  {model}: HTTP 429 {r.text[:300]}")
+                break  # quota khatam: retry ka fayda nahi, agla model try karo
+            if r.status_code in (500, 503):
+                log(f"  {model}: HTTP {r.status_code} {r.text[:200]}")
                 time.sleep(8 * (attempt + 1))
                 continue
             if r.status_code != 200:
