@@ -25,8 +25,12 @@ import urllib.parse
 from datetime import date
 from pathlib import Path
 
+import cv2
 import numpy as np
 import requests
+
+import animate
+import audiofx
 from PIL import Image, ImageDraw, ImageFilter
 
 W, H, FPS = 720, 1280, 30
@@ -43,7 +47,9 @@ GEMINI_IMAGE_MODEL = os.getenv("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
 IMAGE_PROVIDERS = [p.strip() for p in os.getenv("IMAGE_PROVIDERS", "cloudflare,pollinations").split(",") if p.strip()]
 HF_MODEL_URL = os.getenv("HF_MODEL_URL", "https://router.huggingface.co/hf-inference/models/black-forest-labs/FLUX.1-schnell")
 VOICE = os.getenv("TTS_VOICE", "hi-IN-MadhurNeural")
-TTS_RATE = os.getenv("TTS_RATE", "-5%")
+TTS_RATE = os.getenv("TTS_RATE", "-6%")
+TTS_PITCH = os.getenv("TTS_PITCH", "-3Hz")  # thodi bhari, dramatic awaaz
+CACHE = Path("models_cache")
 STYLE = os.getenv(
     "STYLE",
     "flat 2D vector illustration, Indian mythology Mahabharat, cutout puppet style characters, "
@@ -167,19 +173,24 @@ def write_script(topic, n):
         "(Mahabharat, Ramayan, Puranas).\n"
         f"Topic: {topic}\n"
         f"Write exactly {n} scenes. Rules:\n"
-        "- narration: simple conversational Hindi in Devanagari, 1-2 short sentences per scene (max 18 words), "
-        "dramatic storytelling tone. Scene 1 must be a strong hook (a question or a shocking secret). "
-        "The last scene is a cliffhanger or 'Part 2' tease.\n"
+        "- narration: simple conversational Hindi in Devanagari, ONE or TWO short sentences per scene "
+        "(max 14 words), dramatic storytelling tone, short punchy sentences. Scene 1 must be a strong hook "
+        "(a question or a shocking secret). The last scene is a cliffhanger or 'Part 2' tease.\n"
         "- Stay with well-known accounts from the texts. Do not invent facts. Respectful tone; "
         "nothing insulting to any religion, caste or community.\n"
         "- characters: an object mapping each recurring character name (English) to ONE fixed English visual "
         "description (skin tone, clothes colours, crown/ornaments, beard, age). Keep it identical for all scenes.\n"
-        "- image_prompt: English. Describe only the setting, action, mood, lighting and camera of that scene. "
-        "Refer to characters by the exact names used in 'characters'. No text in the image.\n"
+        "- image_prompt: English. Start with the SHOT TYPE, then the setting, action, mood, lighting. "
+        "Refer to characters by the exact names used in 'characters'. No text in the image. "
+        "VARY the shots: wide establishing shot, medium shot, low-angle hero shot, silhouette, "
+        "back view, over-the-shoulder, hands or object close-up (weapon, dice, bow, lamp, fire), "
+        "landscape/sky/battlefield. Use a face close-up in AT MOST 3 scenes. "
+        "Prefer shots where the face is small or hidden, so the character stays consistent.\n"
         "- scene.characters: list of character names appearing in that scene.\n"
+        "- scene.energy: 1 = calm, 2 = tense, 3 = action/shock (controls camera shake and sound).\n"
         'Return ONLY JSON: {"title":"(Hindi)","description":"(Hindi, 2 lines)","hashtags":["#..."],'
         '"characters":{"Name":"visual description"},'
-        '"scenes":[{"narration":"...","image_prompt":"...","characters":["Name"]}]}'
+        '"scenes":[{"narration":"...","image_prompt":"...","characters":["Name"],"energy":2}]}'
     )
     data = llm_json(prompt)
     assert data.get("scenes"), "empty script"
@@ -306,18 +317,23 @@ def clean_text(t):
     return t
 
 
-async def _edge(text, path, voice, rate):
+async def _edge(text, path, voice, rate, pitch):
     import edge_tts
 
-    kw = {"rate": rate} if rate else {}
+    kw = {}
+    if rate:
+        kw["rate"] = rate
+    if pitch:
+        kw["pitch"] = pitch
     await edge_tts.Communicate(text, voice, **kw).save(str(path))
 
 
 def tts_edge(text, path):
-    tries = [(VOICE, TTS_RATE), (VOICE, None), ("hi-IN-SwaraNeural", None), (VOICE, None)]
-    for n, (voice, rate) in enumerate(tries, 1):
+    tries = [(VOICE, TTS_RATE, TTS_PITCH), (VOICE, TTS_RATE, None), (VOICE, None, None),
+             ("hi-IN-SwaraNeural", None, None), (VOICE, None, None)]
+    for n, (voice, rate, pitch) in enumerate(tries, 1):
         try:
-            asyncio.run(_edge(text, path, voice, rate))
+            asyncio.run(_edge(text, path, voice, rate, pitch))
             if Path(path).exists() and Path(path).stat().st_size > 1000:
                 return
         except Exception as e:  # noqa: BLE001
@@ -332,7 +348,7 @@ def tts_piper(text, path):
 
     from piper import PiperVoice
 
-    mdir = Path("work/piper")
+    mdir = CACHE / "piper"
     mdir.mkdir(parents=True, exist_ok=True)
     name = f"hi_IN-{PIPER_VOICE}-medium"
     base = f"https://huggingface.co/rhasspy/piper-voices/resolve/main/hi/hi_IN/{PIPER_VOICE}/medium/{name}"
@@ -378,35 +394,21 @@ def duration(path):
 
 
 # --------------------------------------------------------------------------- video
-def motion(kind, frames):
-    inc = 0.22 / frames
-    cy = "ih/2-(ih/zoom/2)"
-    if kind == 0:  # slow zoom in
-        return f"1+{inc:.7f}*on", "iw/2-(iw/zoom/2)", cy
-    if kind == 1:  # slow zoom out
-        return f"1.22-{inc:.7f}*on", "iw/2-(iw/zoom/2)", cy
-    if kind == 2:  # pan left -> right
-        return "1.18", f"(iw-iw/zoom)*on/{frames}", cy
-    return "1.18", f"(iw-iw/zoom)*(1-on/{frames})", cy  # pan right -> left
-
-
-def build_clip(img, audio, idx, out):
-    pad = 0.45
-    dur = duration(audio) + pad
-    frames = math.ceil(dur * FPS)
-    z, x, y = motion(idx % 4, frames)
-    fc = (
-        f"[0:v]zoompan=z='{z}':x='{x}':y='{y}':d={frames}:s={W}x{H}:fps={FPS},"
-        f"fade=t=in:st=0:d=0.25,fade=t=out:st={dur - 0.25:.2f}:d=0.25,format=yuv420p[v];"
-        f"[1:a]apad=pad_dur={pad},aresample=44100,aformat=channel_layouts=stereo[a]"
-    )
+def build_clip(img, audio, idx, out, energy=2, use_model=True):
+    """Animated 2.5D clip + voice. Returns (duration, internal_cut_time_or_None)."""
+    pad = 0.3
+    dur = max(duration(audio) + pad, 3.0)
+    src = cv2.imread(str(img))
+    depth = animate.get_depth(src, cache_dir=CACHE, use_model=use_model)
+    vid = WORK / f"s{idx}_v.mp4"
+    cut = animate.render_scene(src, depth, dur, idx, vid, energy=energy)
     run([
-        "ffmpeg", "-y", "-i", str(img), "-i", str(audio), "-filter_complex", fc,
-        "-map", "[v]", "-map", "[a]", "-t", f"{dur:.2f}",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-r", str(FPS),
-        "-c:a", "aac", "-b:a", "128k", "-ar", "44100", str(out),
+        "ffmpeg", "-y", "-i", str(vid), "-i", str(audio),
+        "-filter_complex", f"[1:a]apad=pad_dur={pad + 3},aresample=44100,aformat=channel_layouts=stereo[a]",
+        "-map", "0:v", "-map", "[a]", "-t", f"{dur:.3f}",
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "160k", "-ar", "44100", str(out),
     ])
-    return dur
+    return dur, cut
 
 
 def make_particles(path, seconds=20, n=90):
@@ -438,7 +440,7 @@ def make_particles(path, seconds=20, n=90):
     p.wait()
 
 
-def assemble(clips, total, out):
+def assemble(clips, total, out, scene_starts, cut_times):
     lst = WORK / "clips.txt"
     lst.write_text("".join(f"file '{c.resolve()}'\n" for c in clips))
     joined = WORK / "joined.mp4"
@@ -446,29 +448,30 @@ def assemble(clips, total, out):
 
     particles = WORK / "particles.mp4"
     make_particles(particles)
+    bed, sfx = audiofx.build_audio_assets(total, scene_starts, cut_times, WORK)
 
-    music = Path("assets/music.mp3")
-    cmd = ["ffmpeg", "-y", "-i", str(joined), "-stream_loop", "-1", "-i", str(particles)]
-    fv = ("[1:v]format=yuv420p[p];[0:v][p]blend=all_mode=screen:all_opacity=0.65,"
-          "vignette=PI/5,eq=contrast=1.06:saturation=1.1[v]")
-    if music.exists():
-        cmd += ["-stream_loop", "-1", "-i", str(music)]
-        fa = (f";[2:a]volume=0.13,afade=t=out:st={total - 2:.2f}:d=2[m];"
-              "[0:a][m]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]")
-        amap = "[a]"
-    else:
-        fa, amap = "", "0:a"
-    cmd += ["-filter_complex", fv + fa, "-map", "[v]", "-map", amap, "-t", f"{total:.2f}",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "24", "-c:a", "aac", "-b:a", "128k",
-            "-movflags", "+faststart", str(out)]
-    run(cmd)
+    fv = ("[0:v]format=gbrp[a];[1:v]format=gbrp[b];"
+          "[a][b]blend=all_mode=screen:all_opacity=0.55,format=yuv420p,vignette=PI/6,"
+          f"eq=contrast=1.05:saturation=1.08,fade=t=in:st=0:d=0.4,fade=t=out:st={total - 0.8:.2f}:d=0.8[v];")
+    fa = ("[0:a]highpass=f=70,equalizer=f=150:t=q:w=1:g=2.5,equalizer=f=3000:t=q:w=1:g=2,"
+          "acompressor=threshold=0.1:ratio=3:attack=5:release=120:makeup=2,"
+          "aecho=0.8:0.85:50:0.15,asplit=2[vo][sc];"
+          "[2:a]volume=0.75[bed];[bed][sc]sidechaincompress=threshold=0.02:ratio=6:attack=15:release=350[duck];"
+          "[3:a]volume=0.8[fx];"
+          "[vo][duck][fx]amix=inputs=3:duration=first:normalize=0,alimiter=limit=0.95,"
+          f"loudnorm=I=-15:TP=-1.5:LRA=11,afade=t=out:st={total - 1.0:.2f}:d=1.0[a]")
+    run(["ffmpeg", "-y", "-i", str(joined), "-stream_loop", "-1", "-i", str(particles),
+         "-i", str(bed), "-i", str(sfx),
+         "-filter_complex", fv + fa, "-map", "[v]", "-map", "[a]", "-t", f"{total:.2f}",
+         "-c:v", "libx264", "-preset", "medium", "-crf", "23", "-c:a", "aac", "-b:a", "160k",
+         "-movflags", "+faststart", str(out)])
     # Telegram bot upload limit is 50 MB
-    crf = 24
+    crf = 23
     while out.stat().st_size > 48 * 1024 * 1024 and crf < 36:
         crf += 4
         small = out.with_suffix(".small.mp4")
         run(["ffmpeg", "-y", "-i", str(out), "-c:v", "libx264", "-crf", str(crf), "-preset", "medium",
-             "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(small)])
+             "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(small)])
         small.replace(out)
 
 
@@ -510,19 +513,20 @@ def main():
                 "scenes": [{"narration": f"scene {i}", "image_prompt": "x", "characters": []} for i in range(1, 5)]}
     else:
         topic = pick_topic()
-        n = int(os.getenv("SCENES", "14"))
+        n = int(os.getenv("SCENES", "22"))
         log(f"Topic: {topic} | scenes: {n}")
         meta = write_script(topic, n)
     (OUT / "script.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
     clips, total = [], 0.0
+    scene_starts, cut_times = [], []
     chars = meta.get("characters", {})
     for i, sc in enumerate(meta["scenes"]):
         log(f"Scene {i + 1}/{len(meta['scenes'])}")
         img, aud, clip = WORK / f"s{i}.jpg", WORK / f"s{i}.mp3", WORK / f"s{i}.mp4"
         if dry:
             placeholder_image(i, img)
-            silent_voice(aud, 2.5 + (i % 2))
+            silent_voice(aud, 4.0 + (i % 2))
         else:
             who = "; ".join(f"{c}: {chars[c]}" for c in sc.get("characters", []) if c in chars)
             prompt = f"{sc['image_prompt']}. Characters: {who}. Style: {STYLE}"
@@ -537,11 +541,16 @@ def main():
                     raise
             make_voice(sc["narration"], aud)
             time.sleep(2)
-        total += build_clip(img, aud, i, clip)
+        energy = int(sc.get("energy", 2) or 2)
+        scene_starts.append(total)
+        dur, cut = build_clip(img, aud, i, clip, energy=energy, use_model=not dry)
+        if cut:
+            cut_times.append(total + cut)
+        total += dur
         clips.append(clip)
 
     final = OUT / "final.mp4"
-    assemble(clips, total, final)
+    assemble(clips, total, final, scene_starts, cut_times)
     log(f"Done: {final} ({final.stat().st_size / 1e6:.1f} MB, {total:.0f}s)")
 
     if dry:
