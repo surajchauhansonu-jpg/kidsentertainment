@@ -45,3 +45,11 @@ Sab kuch GitHub Actions me chalta hai, tumhare PC ki zarurat nahi.
 2. Characters `characters/` folder me save ho jate hain. Naya character jodna ho to `characters.json` me line add karo.
 3. Phir normal **Make Video** chalao: jin scenes me character bolta/khada hai wahan wo rig hoke chalta hai
    (saans, sar hilna, haath, kapde ka hilna, voice ke saath sync), baaki scenes (jung, yuddh, hathiyar) normal image + 3D camera.
+
+## v4: VECTOR PUPPET mode (default) - reference jaisa style
+- Characters aur scenes **code se draw** hote hain (Skia): jointed puppets, mukut, kavach, dhoti, mandala-sun, khambhe, baadal, roshni.
+- AI image / Cloudflare / HuggingFace ki zarurat nahi. Har scene me character bilkul wahi rehta hai.
+- Mooh voice ke saath sync, haath ke ishare, namaste, gussa, udaas, chalna, ladna, tairna (gods).
+- Cast `vp_cast.py` me hai (Krishna, Arjun, Karna, Duryodhan, Bhishma, Draupadi, Yudhishthir, Bhima, Shakuni, Ashwatthama, Dronacharya,
+  Abhimanyu, Gandhari, Dhritarashtra, Kunti, Barbarik, Ghatotkacha, Sanjay, Vyasa, Brahma, Surya). Naya character = ek entry add karo.
+- Purana AI-image mode chahiye to workflow env me `MODE: images`.
